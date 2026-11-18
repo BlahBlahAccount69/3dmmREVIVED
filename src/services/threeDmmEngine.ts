@@ -1,0 +1,1213 @@
+import * as THREE from 'three';
+import { ChunkyFile, ChunkMeta, getArchive } from './chunkyParser';
+import {
+  parseGL,
+  parseGG,
+  readBmat34ToMatrix4,
+  readFixed16,
+} from './kauaiCodec';
+import {
+  applyGlcrPalette,
+  decodeTmapToTexture,
+  decodeZbmpToDepthTexture,
+  loadBasePalette,
+  mbmpToDataUrl,
+  Palette256,
+} from './mbmpDecoder';
+import { PropAction } from '../types/movie';
+
+export interface CatalogActorItem {
+  tmplCno: number;
+  tmthCno: number;
+  name: string;
+  thumbDataUrl: string | null;
+}
+
+export interface CatalogPropItem {
+  tmplCno: number;
+  prthCno: number;
+  name: string;
+  thumbDataUrl: string | null;
+}
+
+export interface CatalogCameraView {
+  icam: number;
+  cathCno: number;
+  thumbDataUrl: string | null;
+}
+
+export interface CatalogSceneItem {
+  bkgdCno: number;
+  name: string;
+  thumbDataUrl: string | null;
+  views: CatalogCameraView[];
+}
+
+export interface ThreeDmmCatalog {
+  actors: CatalogActorItem[];
+  props: CatalogPropItem[];
+  scenes: CatalogSceneItem[];
+}
+
+export interface ActionCelPartSpec {
+  chidModl: number;
+  imat34: number;
+}
+
+export interface ParsedAction {
+  anid: number;
+  name: string;
+  grfactn: number;
+  cels: {
+    dwr: number;
+    parts: ActionCelPartSpec[];
+  }[];
+  matrices: THREE.Matrix4[];
+}
+
+export interface ParsedCmtl {
+  cmid: number;
+  ibset: number;
+  materials: THREE.Material[];
+  overrideGeometries: (THREE.BufferGeometry | null)[];
+}
+
+export interface ParsedTemplate {
+  tmplCno: number;
+  name: string;
+  isProp: boolean;
+  isTdt: boolean;
+  xaRest: number;
+  yaRest: number;
+  zaRest: number;
+  parentIds: number[];
+  bodyPartSets: number[];
+  costumeSets: number[][];
+  actions: { anid: number; name: string }[];
+  defaultPoseActions: ParsedAction[];
+  bmdls: Map<number, THREE.BufferGeometry>;
+  cmtls: Map<number, ParsedCmtl>;
+  actionCache: Map<number, ParsedAction>;
+  tmplsFile: ChunkyFile;
+  tmplMeta: ChunkMeta;
+}
+
+export interface TemplateRig {
+  root: THREE.Group;
+  bodyRoot: THREE.Group;
+  parts: THREE.Group[];
+  meshes: THREE.Mesh[];
+  template: ParsedTemplate;
+  costumeCmids: number[];
+  baseScale: number;
+}
+
+export interface LoadedBackgroundView {
+  bkgdCno: number;
+  bkgdName: string;
+  icam: number;
+  fovDeg: number;
+  hither: number;
+  yon: number;
+  apos: THREE.Vector3;
+  stageOrigin: THREE.Vector3;
+  aposes: THREE.Vector3[];
+  camMatrix: THREE.Matrix4;
+  camPosition: THREE.Vector3;
+  camQuaternion: THREE.Quaternion;
+  camForwardXZ: THREE.Vector3;
+  camRightXZ: THREE.Vector3;
+  backdropDataUrl: string | null;
+  zbmpDepthTexture: THREE.DataTexture | null;
+  lights: { type: number; color: number; intensity: number; matrix: THREE.Matrix4 }[];
+}
+
+export interface ParsedTdfFont {
+  tdfCno: number;
+  name: string;
+  widths: number[];
+  glyphGeos: Map<number, THREE.BufferGeometry>;
+}
+
+let catalogPromise: Promise<ThreeDmmCatalog> | null = null;
+const templateCache = new Map<string, Promise<ParsedTemplate>>();
+const bgViewCache = new Map<string, Promise<LoadedBackgroundView>>();
+const directMtrlCache = new Map<string, Promise<THREE.Material | null>>();
+const tdfFontCache = new Map<number, Promise<ParsedTdfFont | null>>();
+
+/**
+ * Loads the complete official catalog from ACTOR.3TH, PROP.3TH, BKGDS.3TH, TMPLS.3CN, and BKGDS.3CN:
+ * 45 actors, 21 props, 12 scenes (188 camera views) with decoded MBMP thumbnails and authentic names.
+ */
+export function loadThreeDmmCatalog(): Promise<ThreeDmmCatalog> {
+  if (catalogPromise) return catalogPromise;
+
+  catalogPromise = (async () => {
+    const [palette, actorTh, propTh, bkgdsTh, tmplsCn, bkgdsCn] = await Promise.all([
+      loadBasePalette(),
+      getArchive('/3dmm/3dmovie/ACTOR.3TH', true),
+      getArchive('/3dmm/3dmovie/PROP.3TH', true),
+      getArchive('/3dmm/3dmovie/BKGDS.3TH', true),
+      getArchive('/3dmm/3dmovie/TMPLS.3CN', false),
+      getArchive('/3dmm/3dmovie/BKGDS.3CN', false),
+    ]);
+
+    // Extract 45 Actors
+    const actors: CatalogActorItem[] = [];
+    for (const tmth of actorTh.getChunksByType('TMTH')) {
+      const data = await actorTh.readChunk('TMTH', tmth.cno);
+      const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const tmplCno = dv.getUint32(8, true);
+      const tmplMeta = tmplsCn.getChunkMeta('TMPL', tmplCno);
+
+      let thumbDataUrl: string | null = null;
+      const gokd = actorTh.findKid(tmth, 'GOKD');
+      if (gokd) {
+        const mbmp = actorTh.findKid(gokd, 'MBMP');
+        if (mbmp) {
+          const mbmpBytes = await actorTh.readChunk('MBMP', mbmp.cno);
+          thumbDataUrl = mbmpToDataUrl(mbmpBytes, palette);
+        }
+      }
+
+      actors.push({
+        tmplCno,
+        tmthCno: tmth.cno,
+        name: tmplMeta?.name || `Actor ${tmplCno}`,
+        thumbDataUrl,
+      });
+    }
+
+    // Extract 21 Props
+    const props: CatalogPropItem[] = [];
+    for (const prth of propTh.getChunksByType('PRTH')) {
+      const data = await propTh.readChunk('PRTH', prth.cno);
+      const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const tmplCno = dv.getUint32(8, true);
+      const tmplMeta = tmplsCn.getChunkMeta('TMPL', tmplCno);
+
+      let thumbDataUrl: string | null = null;
+      const gokd = propTh.findKid(prth, 'GOKD');
+      if (gokd) {
+        const mbmp = propTh.findKid(gokd, 'MBMP');
+        if (mbmp) {
+          const mbmpBytes = await propTh.readChunk('MBMP', mbmp.cno);
+          thumbDataUrl = mbmpToDataUrl(mbmpBytes, palette);
+        }
+      }
+
+      props.push({
+        tmplCno,
+        prthCno: prth.cno,
+        name: tmplMeta?.name || `Prop ${tmplCno}`,
+        thumbDataUrl,
+      });
+    }
+
+    // Extract 12 Scenes + 188 Camera Views
+    const scenes: CatalogSceneItem[] = [];
+    for (const bkth of bkgdsTh.getChunksByType('BKTH')) {
+      const data = await bkgdsTh.readChunk('BKTH', bkth.cno);
+      const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const bkgdCno = dv.getUint32(8, true);
+      const bkgdMeta = bkgdsCn.getChunkMeta('BKGD', bkgdCno);
+
+      let sceneThumb: string | null = null;
+      const rootGokd = bkgdsTh.findKid(bkth, 'GOKD');
+      if (rootGokd) {
+        const mbmp = bkgdsTh.findKid(rootGokd, 'MBMP');
+        if (mbmp) {
+          sceneThumb = mbmpToDataUrl(await bkgdsTh.readChunk('MBMP', mbmp.cno), palette);
+        }
+      }
+
+      const views: CatalogCameraView[] = [];
+      const cathKids = bkgdsTh
+        .findKids(bkth, 'CATH')
+        .sort((a, b) => a.kid.chid - b.kid.chid);
+
+      for (const { kid, meta: cathMeta } of cathKids) {
+        let viewThumb: string | null = null;
+        const viewMbmp = bkgdsTh.findKid(cathMeta, 'MBMP');
+        if (viewMbmp) {
+          viewThumb = mbmpToDataUrl(await bkgdsTh.readChunk('MBMP', viewMbmp.cno), palette);
+        } else if (kid.chid === 0) {
+          viewThumb = sceneThumb;
+        }
+        views.push({
+          icam: kid.chid,
+          cathCno: cathMeta.cno,
+          thumbDataUrl: viewThumb || sceneThumb,
+        });
+      }
+
+      scenes.push({
+        bkgdCno,
+        name: (bkgdMeta?.name || `Background ${bkgdCno}`).replace(/\s+Background$/i, ''),
+        thumbDataUrl: sceneThumb || views[0]?.thumbDataUrl || null,
+        views,
+      });
+    }
+
+    return { actors, props, scenes };
+  })();
+
+  return catalogPromise;
+}
+
+/**
+ * Parses a BRender BMDL chunk into a Three.js BufferGeometry.
+ */
+export function parseBmdlGeometry(bmdlBytes: Uint8Array): THREE.BufferGeometry {
+  const dv = new DataView(bmdlBytes.buffer, bmdlBytes.byteOffset, bmdlBytes.byteLength);
+  const cver = dv.getInt16(4, true);
+  const cfac = dv.getInt16(6, true);
+
+  if (cver <= 0 || cfac <= 0) {
+    return new THREE.BufferGeometry();
+  }
+
+  const positions = new Float32Array(cver * 3);
+  const uvs = new Float32Array(cver * 2);
+
+  for (let i = 0; i < cver; i++) {
+    const vOff = 48 + i * 32;
+    positions[i * 3 + 0] = readFixed16(dv, vOff + 0);
+    positions[i * 3 + 1] = readFixed16(dv, vOff + 4);
+    positions[i * 3 + 2] = readFixed16(dv, vOff + 8);
+    uvs[i * 2 + 0] = readFixed16(dv, vOff + 12);
+    uvs[i * 2 + 1] = readFixed16(dv, vOff + 16);
+  }
+
+  const indices = new Uint32Array(cfac * 3);
+  const brfBase = 48 + cver * 32;
+  for (let f = 0; f < cfac; f++) {
+    const fOff = brfBase + f * 32;
+    indices[f * 3 + 0] = dv.getUint16(fOff + 0, true);
+    indices[f * 3 + 1] = dv.getUint16(fOff + 2, true);
+    indices[f * 3 + 2] = dv.getUint16(fOff + 4, true);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geo.setIndex(new THREE.BufferAttribute(indices, 1));
+  geo.computeVertexNormals();
+  computeWeldedSmoothNormals(geo);
+  geo.computeBoundingSphere();
+  geo.computeBoundingBox();
+  return geo;
+}
+
+/**
+ * Welds normals across duplicate spatial vertices (e.g. UV seams in BRender BMDLs)
+ * so smooth Gouraud shading flows seamlessly across body & prop contours.
+ */
+function computeWeldedSmoothNormals(geo: THREE.BufferGeometry) {
+  const posAttr = geo.getAttribute('position');
+  const normAttr = geo.getAttribute('normal');
+  if (!posAttr || !normAttr) return;
+
+  const accum = new Map<string, [number, number, number]>();
+  const keys = new Array<string>(posAttr.count);
+
+  for (let i = 0; i < posAttr.count; i++) {
+    const key = `${Math.round(posAttr.getX(i) * 500)}_${Math.round(posAttr.getY(i) * 500)}_${Math.round(posAttr.getZ(i) * 500)}`;
+    keys[i] = key;
+    const nx = normAttr.getX(i);
+    const ny = normAttr.getY(i);
+    const nz = normAttr.getZ(i);
+    const prev = accum.get(key);
+    if (prev) {
+      prev[0] += nx;
+      prev[1] += ny;
+      prev[2] += nz;
+    } else {
+      accum.set(key, [nx, ny, nz]);
+    }
+  }
+
+  for (let i = 0; i < posAttr.count; i++) {
+    const sum = accum.get(keys[i]);
+    if (!sum) continue;
+    const len = Math.hypot(sum[0], sum[1], sum[2]);
+    if (len > 1e-6) {
+      normAttr.setXYZ(i, sum[0] / len, sum[1] / len, sum[2] / len);
+    }
+  }
+  normAttr.needsUpdate = true;
+}
+
+async function parseMtrlToThree(
+  archive: ChunkyFile,
+  mtrlMeta: ChunkMeta,
+  palette: Palette256
+): Promise<THREE.Material> {
+  const data = await archive.readChunk('MTRL', mtrlMeta.cno);
+  const bIndexBase = data[14] ?? 0;
+  const cIndexRange = data[15] ?? 0;
+
+  const tmapKid = archive.findKid(mtrlMeta, 'TMAP', 0) || archive.findKid(mtrlMeta, 'TMAP');
+  if (tmapKid) {
+    const tmapBytes = await archive.readChunk('TMAP', tmapKid.cno);
+    const tex = decodeTmapToTexture(tmapBytes, palette);
+    if (tex) {
+      return new THREE.MeshStandardMaterial({
+        map: tex,
+        flatShading: false,
+        roughness: 0.7,
+        metalness: 0.05,
+        side: THREE.DoubleSide,
+      });
+    }
+  }
+
+  let r = data[6] ?? 180;
+  let g = data[5] ?? 180;
+  let b = data[4] ?? 180;
+
+  if (cIndexRange > 0 || bIndexBase > 0) {
+    const palIdx = Math.min(255, bIndexBase + Math.max(0, Math.floor(cIndexRange * 0.65)));
+    r = palette[palIdx * 3 + 0];
+    g = palette[palIdx * 3 + 1];
+    b = palette[palIdx * 3 + 2];
+  }
+
+  return new THREE.MeshStandardMaterial({
+    color: new THREE.Color(r / 255, g / 255, b / 255),
+    flatShading: false,
+    roughness: 0.65,
+    metalness: 0.08,
+    side: THREE.DoubleSide,
+  });
+}
+
+export async function loadDirectMtrl(
+  mtrlCno: number,
+  overrideArchive?: ChunkyFile
+): Promise<THREE.Material | null> {
+  const key = overrideArchive ? `custom:${mtrlCno}` : `std:${mtrlCno}`;
+  const cached = directMtrlCache.get(key);
+  if (cached) return cached;
+  const p = (async () => {
+    try {
+      const palette = await loadBasePalette();
+      if (overrideArchive) {
+        const customMeta = overrideArchive.getChunkMeta('MTRL', mtrlCno);
+        if (customMeta) return await parseMtrlToThree(overrideArchive, customMeta, palette);
+      }
+      const mtrlsCn = await getArchive('/3dmm/3dmovie/MTRLS.3CN', false);
+      const meta = mtrlsCn.getChunkMeta('MTRL', mtrlCno);
+      if (!meta) return null;
+      return await parseMtrlToThree(mtrlsCn, meta, palette);
+    } catch {
+      return null;
+    }
+  })();
+  directMtrlCache.set(key, p);
+  return p;
+}
+
+export function loadTdfFont(tdfCno: number): Promise<ParsedTdfFont | null> {
+  const cached = tdfFontCache.get(tdfCno);
+  if (cached) return cached;
+  const p = (async () => {
+    try {
+      const tdfs = await getArchive('/3dmm/3dmovie/TDFS.3CN', false);
+      const tdfMeta = tdfs.getChunkMeta('TDF ', tdfCno) || tdfs.getChunksByType('TDF ')[0];
+      if (!tdfMeta) return null;
+      const raw = await tdfs.readChunk('TDF ', tdfMeta.cno);
+      const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+      const widths: number[] = [];
+      for (let i = 0; i < 256 && 12 + i * 4 + 4 <= raw.length; i++) {
+        widths.push(readFixed16(dv, 12 + i * 4));
+      }
+      return {
+        tdfCno: tdfMeta.cno,
+        name: tdfMeta.name || `Font ${tdfMeta.cno}`,
+        widths,
+        glyphGeos: new Map<number, THREE.BufferGeometry>(),
+      };
+    } catch {
+      return null;
+    }
+  })();
+  tdfFontCache.set(tdfCno, p);
+  return p;
+}
+
+/**
+ * Builds an authentic 3DMM 3D Text THREE.Group using glyph BMDLs from TDFS.3CN,
+ * applying tdts layout shape (0=flat, 1=circle, 2=arch, 6=vertical, 7=curved) and MTRL material.
+ */
+export async function buildTdtTextGroup(
+  text: string,
+  tdfCno: number,
+  tdts: number,
+  mtrlCno?: number
+): Promise<THREE.Group> {
+  const group = new THREE.Group();
+  const [font, tdfs, mtrl] = await Promise.all([
+    loadTdfFont(tdfCno),
+    getArchive('/3dmm/3dmovie/TDFS.3CN', false),
+    mtrlCno !== undefined ? loadDirectMtrl(mtrlCno) : Promise.resolve(null),
+  ]);
+
+  const material =
+    mtrl ||
+    new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      flatShading: false,
+      roughness: 0.45,
+      metalness: 0.15,
+      side: THREE.DoubleSide,
+    });
+
+  if (!font) return group;
+  const tdfMeta = tdfs.getChunkMeta('TDF ', font.tdfCno);
+  if (!tdfMeta) return group;
+
+  const chars = Array.from(text || '');
+  const charCodes = chars.map((ch) => Math.max(32, Math.min(255, ch.charCodeAt(0))));
+
+  await Promise.all(
+    Array.from(new Set(charCodes)).map(async (code) => {
+      if (font.glyphGeos.has(code)) return;
+      const kid = tdfs.findKid(tdfMeta, 'BMDL', code);
+      if (kid) {
+        const bytes = await tdfs.readChunk('BMDL', kid.cno);
+        font.glyphGeos.set(code, parseBmdlGeometry(bytes));
+      }
+    })
+  );
+
+  const advances = charCodes.map((c) => {
+    const w = font.widths[c] ?? 3.0;
+    return w > 0.1 ? w : 2.5;
+  });
+  const totalWidth = advances.reduce((a, b) => a + b, 0);
+
+  if (tdts === 6) {
+    // Vertical stack
+    let curY = (chars.length - 1) * 5.2;
+    for (let i = 0; i < charCodes.length; i++) {
+      const geo = font.glyphGeos.get(charCodes[i]);
+      if (geo && geo.attributes.position) {
+        const mesh = new THREE.Mesh(geo, material);
+        mesh.position.set(0, curY, 0);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+      }
+      curY -= 5.4;
+    }
+    return group;
+  }
+
+  let curX = -totalWidth * 0.5;
+  const n = Math.max(1, chars.length);
+
+  for (let i = 0; i < charCodes.length; i++) {
+    const adv = advances[i];
+    const cx = curX + adv * 0.5;
+    curX += adv;
+
+    const geo = font.glyphGeos.get(charCodes[i]);
+    if (!geo || !geo.attributes.position) continue;
+
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    const normPos = totalWidth > 0.1 ? cx / (totalWidth * 0.5) : 0; // -1..1
+    if (tdts === 1) {
+      // Circle / Ring wrap
+      const radius = Math.max(8, totalWidth / (2 * Math.PI) + 4);
+      const theta = (normPos * Math.PI * 0.85);
+      mesh.position.set(Math.sin(theta) * radius, 0, Math.cos(theta) * radius - radius);
+      mesh.rotation.y = theta;
+    } else if (tdts === 2 || tdts === 7) {
+      // Arch / Curved ribbon
+      const archY = (1 - normPos * normPos) * 3.5;
+      mesh.position.set(cx, archY, 0);
+      mesh.rotation.z = -normPos * 0.25;
+    } else if (tdts === 3) {
+      // Mountain / Pyramid scale
+      const s = 1.0 + (1 - Math.abs(normPos)) * 0.65;
+      mesh.position.set(cx, 0, 0);
+      mesh.scale.set(1, s, 1);
+    } else if (tdts === 4) {
+      // Valley
+      const s = 0.75 + Math.abs(normPos) * 0.65;
+      mesh.position.set(cx, 0, 0);
+      mesh.scale.set(1, s, 1);
+    } else {
+      // 0 = Standard flat straight horizontal 3D text
+      mesh.position.set(cx, 0, 0);
+    }
+
+    group.add(mesh);
+  }
+
+  return group;
+}
+
+async function parseCmtl(
+  archive: ChunkyFile,
+  cmtlMeta: ChunkMeta,
+  cmid: number,
+  palette: Palette256
+): Promise<ParsedCmtl> {
+  const bytes = await archive.readChunk('CMTL', cmtlMeta.cno);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const ibset = dv.getInt32(4, true);
+
+  let maxChid = -1;
+  for (const k of cmtlMeta.kids) {
+    if (k.ctg === 'MTRL' || k.ctg === 'BMDL') {
+      if ((k.chid | 0) > maxChid) maxChid = k.chid | 0;
+    }
+  }
+  const cbprt = maxChid + 1;
+  const materials: THREE.Material[] = [];
+  const overrideGeometries: (THREE.BufferGeometry | null)[] = [];
+
+  for (let i = 0; i < cbprt; i++) {
+    const mKid = archive.findKid(cmtlMeta, 'MTRL', i);
+    if (mKid) {
+      materials.push(await parseMtrlToThree(archive, mKid, palette));
+    } else {
+      materials.push(
+        new THREE.MeshStandardMaterial({
+          color: 0xcccccc,
+          flatShading: false,
+          roughness: 0.68,
+        })
+      );
+    }
+
+    const bKid = archive.findKid(cmtlMeta, 'BMDL', i);
+    if (bKid) {
+      const bData = await archive.readChunk('BMDL', bKid.cno);
+      overrideGeometries.push(parseBmdlGeometry(bData));
+    } else {
+      overrideGeometries.push(null);
+    }
+  }
+
+  return { cmid, ibset, materials, overrideGeometries };
+}
+
+export async function loadAction(
+  template: ParsedTemplate,
+  anid: number
+): Promise<ParsedAction | null> {
+  const cached = template.actionCache.get(anid);
+  if (cached) return cached;
+
+  const actnMeta = template.tmplsFile.findKid(template.tmplMeta, 'ACTN', anid);
+  if (!actnMeta) return null;
+
+  const archive = template.tmplsFile;
+  const actnBytes = await archive.readChunk('ACTN', actnMeta.cno);
+  const actnDv = new DataView(actnBytes.buffer, actnBytes.byteOffset, actnBytes.byteLength);
+  const grfactn = actnBytes.length >= 8 ? actnDv.getUint32(4, true) : 0;
+
+  const ggclMeta = archive.findKid(actnMeta, 'GGCL', 0) || archive.findKid(actnMeta, 'GGCL');
+  const glxfMeta = archive.findKid(actnMeta, 'GLXF', 0) || archive.findKid(actnMeta, 'GLXF');
+  if (!ggclMeta || !glxfMeta) return null;
+
+  const [ggclBytes, glxfBytes] = await Promise.all([
+    archive.readChunk('GGCL', ggclMeta.cno),
+    archive.readChunk('GLXF', glxfMeta.cno),
+  ]);
+
+  const glxf = parseGL(glxfBytes);
+  const matrices: THREE.Matrix4[] = [];
+  for (let i = 0; i < glxf.count; i++) {
+    matrices.push(readBmat34ToMatrix4(glxf.dv, glxf.entryOffset(i)));
+  }
+
+  const ggcl = parseGG(ggclBytes);
+  const cels: ParsedAction['cels'] = [];
+  const neededBmdls: Promise<void>[] = [];
+
+  for (let icel = 0; icel < ggcl.count; icel++) {
+    const entry = ggcl.getEntry(icel);
+    const dwr = readFixed16(ggcl.dv, entry.fixedOffset + 4);
+    const cpsCount = Math.floor(entry.varLength / 4);
+    const parts: ActionCelPartSpec[] = [];
+
+    for (let ip = 0; ip < cpsCount; ip++) {
+      const off = entry.varOffset + ip * 4;
+      const chidModl = ggcl.dv.getInt16(off, true);
+      const imat34 = ggcl.dv.getInt16(off + 2, true);
+      parts.push({ chidModl, imat34 });
+
+      if (chidModl >= 0 && !template.bmdls.has(chidModl)) {
+        const bKid = archive.findKid(template.tmplMeta, 'BMDL', chidModl);
+        if (bKid) {
+          neededBmdls.push(
+            archive.readChunk('BMDL', bKid.cno).then((raw) => {
+              template.bmdls.set(chidModl, parseBmdlGeometry(raw));
+            })
+          );
+        }
+      }
+    }
+    cels.push({ dwr, parts });
+  }
+
+  if (neededBmdls.length > 0) {
+    await Promise.all(neededBmdls);
+  }
+
+  const action: ParsedAction = {
+    anid,
+    name: actnMeta.name || (anid === 0 ? 'At Rest' : `Action ${anid}`),
+    grfactn,
+    cels,
+    matrices,
+  };
+  template.actionCache.set(anid, action);
+  return action;
+}
+
+/**
+ * Loads and parses a real TMPL (actor or prop) from TMPLS.3CN (or an embedded ChunkyFile from a .3MM).
+ */
+export function loadTemplate(
+  tmplCno: number,
+  overrideArchive?: ChunkyFile
+): Promise<ParsedTemplate> {
+  const key = overrideArchive ? `custom:${tmplCno}` : `std:${tmplCno}`;
+  if (!overrideArchive) {
+    const cached = templateCache.get(key);
+    if (cached) return cached;
+  }
+
+  const p = (async () => {
+    const [palette, tmplsFile] = await Promise.all([
+      loadBasePalette(),
+      overrideArchive ? Promise.resolve(overrideArchive) : getArchive('/3dmm/3dmovie/TMPLS.3CN', false),
+    ]);
+
+    const tmplMeta = tmplsFile.getChunkMeta('TMPL', tmplCno);
+    if (!tmplMeta) throw new Error(`TMPL:${tmplCno} not found`);
+
+    const tmplBytes = await tmplsFile.readChunk('TMPL', tmplCno);
+    const tmplDv = new DataView(tmplBytes.buffer, tmplBytes.byteOffset, tmplBytes.byteLength);
+    const xaRest = tmplBytes.length >= 10 ? (tmplDv.getInt16(4, true) * Math.PI * 2) / 65536 : 0;
+    const yaRest = tmplBytes.length >= 10 ? (tmplDv.getInt16(6, true) * Math.PI * 2) / 65536 : Math.PI / 2;
+    const zaRest = tmplBytes.length >= 10 ? (tmplDv.getInt16(8, true) * Math.PI * 2) / 65536 : 0;
+    const grftmpl = tmplBytes.length >= 16 ? tmplDv.getUint32(12, true) : 0;
+    const isTdt = (grftmpl & 2) !== 0;
+    const isProp = (grftmpl & 4) !== 0;
+
+    const glpiMeta = tmplsFile.findKid(tmplMeta, 'GLPI');
+    const glbsMeta = tmplsFile.findKid(tmplMeta, 'GLBS');
+    const ggcmMeta = tmplsFile.findKid(tmplMeta, 'GGCM');
+
+    const parentIds: number[] = [];
+    if (glpiMeta) {
+      const gl = parseGL(await tmplsFile.readChunk('GLPI', glpiMeta.cno));
+      for (let i = 0; i < gl.count; i++) {
+        parentIds.push(gl.dv.getInt16(gl.entryOffset(i), true));
+      }
+    }
+
+    const bodyPartSets: number[] = [];
+    if (glbsMeta) {
+      const gl = parseGL(await tmplsFile.readChunk('GLBS', glbsMeta.cno));
+      for (let i = 0; i < gl.count; i++) {
+        bodyPartSets.push(gl.dv.getInt16(gl.entryOffset(i), true));
+      }
+    }
+
+    const costumeSets: number[][] = [];
+    if (ggcmMeta) {
+      const gg = parseGG(await tmplsFile.readChunk('GGCM', ggcmMeta.cno));
+      for (let i = 0; i < gg.count; i++) {
+        const e = gg.getEntry(i);
+        const cnt = Math.floor(e.varLength / 4);
+        const ids: number[] = [];
+        for (let k = 0; k < cnt; k++) {
+          ids.push(gg.dv.getInt32(e.varOffset + k * 4, true));
+        }
+        costumeSets.push(ids);
+      }
+    }
+
+    // List all ACTNs cleanly
+    const actnKids = tmplsFile
+      .findKids(tmplMeta, 'ACTN')
+      .sort((a, b) => a.kid.chid - b.kid.chid);
+    const actions = actnKids.map(({ kid, meta }) => ({
+      anid: kid.chid,
+      name: (meta.name || (kid.chid === 0 ? 'At Rest' : `Action ${kid.chid}`)).replace(/\s*\*$/, ''),
+    }));
+
+    // Load ALL CMTL costumes/textures cleanly (no artificial cap) so every texture & costume works
+    const cmtls = new Map<number, ParsedCmtl>();
+    const cmtlKids = tmplsFile.findKids(tmplMeta, 'CMTL');
+    await Promise.all(
+      cmtlKids.map(async ({ kid, meta }) => {
+        const parsed = await parseCmtl(tmplsFile, meta, kid.chid, palette);
+        cmtls.set(kid.chid, parsed);
+      })
+    );
+
+    const parsedTemplate: ParsedTemplate = {
+      tmplCno,
+      name: tmplMeta.name || `Model ${tmplCno}`,
+      isProp,
+      isTdt,
+      xaRest,
+      yaRest,
+      zaRest,
+      parentIds,
+      bodyPartSets,
+      costumeSets,
+      actions,
+      defaultPoseActions: [],
+      bmdls: new Map(),
+      cmtls,
+      actionCache: new Map(),
+      tmplsFile,
+      tmplMeta,
+    };
+
+    // Always preload Action 0 ('At Rest') so initial geometry & skeleton are ready immediately
+    const act0 = await loadAction(parsedTemplate, 0);
+    if (act0) parsedTemplate.defaultPoseActions.push(act0);
+
+    return parsedTemplate;
+  })();
+
+  if (!overrideArchive) {
+    templateCache.set(key, p);
+  }
+  return p;
+}
+
+/**
+ * Instantiates a hierarchical Three.js rig from a parsed 3DMM TMPL (real BODY.CPP / TMPL.CPP hierarchy).
+ * Rest orientation from TMPL header aligns local forward to +Z so rotation.y matches heading atan2(dx, dz).
+ */
+export function instantiateTemplateRig(
+  template: ParsedTemplate,
+  costumeCmids?: number[],
+  costumeMtrls?: { ibset: number; mtrlCno: number }[]
+): TemplateRig {
+  const root = new THREE.Group();
+  const bodyRoot = new THREE.Group();
+  bodyRoot.rotation.set(template.xaRest, template.yaRest, template.zaRest, 'YXZ');
+  root.add(bodyRoot);
+
+  const cbactPart = Math.max(template.parentIds.length, 1);
+  const parts: THREE.Group[] = [];
+  const meshes: THREE.Mesh[] = [];
+
+  const defaultMat = new THREE.MeshStandardMaterial({
+    color: 0xd0d0d0,
+    flatShading: false,
+    roughness: 0.68,
+    metalness: 0.08,
+    side: THREE.DoubleSide,
+  });
+
+  for (let i = 0; i < cbactPart; i++) {
+    const grp = new THREE.Group();
+    grp.matrixAutoUpdate = false;
+    parts.push(grp);
+
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), defaultMat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    grp.add(mesh);
+    meshes.push(mesh);
+  }
+
+  for (let i = 0; i < cbactPart; i++) {
+    const pid = template.parentIds[i] ?? -1;
+    if (pid < 0 || pid >= cbactPart || pid === i) {
+      bodyRoot.add(parts[i]);
+    } else {
+      parts[pid].add(parts[i]);
+    }
+  }
+
+  const rig: TemplateRig = {
+    root,
+    bodyRoot,
+    parts,
+    meshes,
+    template,
+    costumeCmids: costumeCmids ? [...costumeCmids] : [],
+    baseScale: 1,
+  };
+
+  applyCostumeToRig(rig, costumeCmids || [], costumeMtrls);
+  const act0 = template.actionCache.get(0);
+  if (act0) applyActionCelToRig(rig, act0, 0);
+
+  return rig;
+}
+
+export function applyCostumeToRig(
+  rig: TemplateRig,
+  costumeCmids: number[],
+  costumeMtrls?: { ibset: number; mtrlCno: number }[]
+) {
+  const { template, meshes } = rig;
+  const act0 = template.actionCache.get(0);
+
+  // Merge default costume per ibset FIRST so partial overrides never leave other body parts untextured!
+  const chosenByIbset = new Map<number, ParsedCmtl>();
+  for (const s of template.costumeSets) {
+    const defId = s[0];
+    if (defId !== undefined) {
+      const defCmtl = template.cmtls.get(defId);
+      if (defCmtl) chosenByIbset.set(defCmtl.ibset, defCmtl);
+    }
+  }
+  for (const cmid of costumeCmids) {
+    const cmtl = template.cmtls.get(cmid);
+    if (cmtl) chosenByIbset.set(cmtl.ibset, cmtl);
+  }
+
+  chosenByIbset.forEach((cmtl) => {
+    let ibmtl = 0;
+    for (let iprt = 0; iprt < meshes.length; iprt++) {
+      if (template.bodyPartSets[iprt] === cmtl.ibset) {
+        if (ibmtl < cmtl.materials.length) {
+          meshes[iprt].material = cmtl.materials[ibmtl];
+        }
+        const overrideGeo = cmtl.overrideGeometries[ibmtl];
+        if (overrideGeo) {
+          meshes[iprt].geometry = overrideGeo;
+        } else {
+          const baseChidModl = act0?.cels[0]?.parts[iprt]?.chidModl ?? -1;
+          if (baseChidModl < 0) {
+            meshes[iprt].geometry = new THREE.BufferGeometry();
+          }
+        }
+        ibmtl++;
+      }
+    }
+  });
+
+  // Apply any direct MTRL overrides (aetCost with fCmtl = false, pointing to MTRLS.3CN)
+  if (costumeMtrls && costumeMtrls.length > 0) {
+    for (const ov of costumeMtrls) {
+      void loadDirectMtrl(ov.mtrlCno).then((mat) => {
+        if (!mat) return;
+        for (let iprt = 0; iprt < meshes.length; iprt++) {
+          if (template.bodyPartSets[iprt] === ov.ibset) {
+            meshes[iprt].material = mat;
+          }
+        }
+      });
+    }
+  }
+}
+
+export function applyActionCelToRig(rig: TemplateRig, action: ParsedAction, frame: number) {
+  if (action.cels.length === 0) return;
+  const icel = ((Math.floor(frame) % action.cels.length) + action.cels.length) % action.cels.length;
+  const cel = action.cels[icel];
+  const { parts, meshes, template } = rig;
+
+  for (let iprt = 0; iprt < parts.length && iprt < cel.parts.length; iprt++) {
+    const spec = cel.parts[iprt];
+    if (spec.imat34 >= 0 && spec.imat34 < action.matrices.length) {
+      parts[iprt].matrix.copy(action.matrices[spec.imat34]);
+      parts[iprt].matrixWorldNeedsUpdate = true;
+    }
+    if (spec.chidModl >= 0) {
+      const geo = template.bmdls.get(spec.chidModl);
+      if (geo && meshes[iprt].geometry !== geo) {
+        meshes[iprt].geometry = geo;
+      }
+    }
+  }
+}
+
+/**
+ * Applies strictly requested prop actions (at rest, grow, grow fast, shrink, shrink fast, spin, spin fast)
+ * on top of real 3DMM prop BMDL geometry.
+ */
+export function applyPropActionTransform(
+  meshRoot: THREE.Group,
+  action: PropAction,
+  frame: number,
+  totalFrames: number,
+  baseScale = 1,
+  baseRotY = 0
+) {
+  const safeTotal = Math.max(totalFrames, 1);
+  const t = Math.min(Math.max(frame / safeTotal, 0), 1);
+
+  let scaleFactor = 1.0;
+  let rotOffset = 0;
+
+  switch (action) {
+    case 'at rest':
+      scaleFactor = 1.0;
+      rotOffset = 0;
+      break;
+    case 'grow':
+      scaleFactor = 0.75 + t * 0.9;
+      break;
+    case 'grow fast':
+      scaleFactor = 0.5 + Math.min(t * 2.2, 1.0) * 1.45;
+      break;
+    case 'shrink':
+      scaleFactor = Math.max(0.28, 1.25 - t * 0.85);
+      break;
+    case 'shrink fast':
+      scaleFactor = Math.max(0.18, 1.4 - Math.min(t * 2.3, 1.0) * 1.15);
+      break;
+    case 'spin':
+      rotOffset = frame * 0.22;
+      break;
+    case 'spin fast':
+      rotOffset = frame * 0.62;
+      break;
+  }
+
+  meshRoot.scale.setScalar(baseScale * scaleFactor);
+  meshRoot.rotation.y = baseRotY + rotOffset;
+}
+
+const _tmpScale = new THREE.Vector3();
+
+/**
+ * Loads a real 3DMM BKGD + CAM view from BKGDS.3CN (including GLCR palette, 544x306 MBMP backdrop,
+ * 544x306 16-bit ZBMP depth buffer, bmat34Cam matrix, FOV, all rgapos placement points, and GLLT lights).
+ */
+export function loadBackgroundView(bkgdCno: number, icam: number): Promise<LoadedBackgroundView> {
+  const key = `${bkgdCno}:${icam}`;
+  const cached = bgViewCache.get(key);
+  if (cached) return cached;
+
+  const p = (async () => {
+    const [basePal, bkgdsCn] = await Promise.all([
+      loadBasePalette(),
+      getArchive('/3dmm/3dmovie/BKGDS.3CN', false),
+    ]);
+
+    const bkgdMeta = bkgdsCn.getChunkMeta('BKGD', bkgdCno);
+    if (!bkgdMeta) throw new Error(`BKGD:${bkgdCno} not found in BKGDS.3CN`);
+
+    const bkgdData = await bkgdsCn.readChunk('BKGD', bkgdCno);
+    const bIndexBase = bkgdData[4] ?? 10;
+
+    let palette = basePal;
+    const glcrMeta = bkgdsCn.findKid(bkgdMeta, 'GLCR', 0) || bkgdsCn.findKid(bkgdMeta, 'GLCR');
+    if (glcrMeta) {
+      const glcrBytes = await bkgdsCn.readChunk('GLCR', glcrMeta.cno);
+      palette = applyGlcrPalette(basePal, glcrBytes, bIndexBase);
+    }
+
+    const camKids = bkgdsCn.findKids(bkgdMeta, 'CAM ').sort((a, b) => a.kid.chid - b.kid.chid);
+    const targetCamMeta =
+      camKids.find((k) => k.kid.chid === icam)?.meta || camKids[0]?.meta;
+    if (!targetCamMeta) throw new Error(`No CAM chunks in BKGD:${bkgdCno}`);
+
+    const camBytes = await bkgdsCn.readChunk('CAM ', targetCamMeta.cno);
+    const camDv = new DataView(camBytes.buffer, camBytes.byteOffset, camBytes.byteLength);
+
+    const hither = readFixed16(camDv, 4);
+    const yon = readFixed16(camDv, 8);
+    const aFov = camDv.getUint16(12, true);
+    const fovDeg = (aFov * 360) / 65536;
+    const apos = new THREE.Vector3(
+      readFixed16(camDv, 16),
+      readFixed16(camDv, 20),
+      readFixed16(camDv, 24)
+    );
+    const camMatrix = readBmat34ToMatrix4(camDv, 28);
+    const camPosition = new THREE.Vector3();
+    const camQuaternion = new THREE.Quaternion();
+    camMatrix.decompose(camPosition, camQuaternion, _tmpScale);
+
+    const camForwardXZ = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuaternion);
+    camForwardXZ.y = 0;
+    if (camForwardXZ.lengthSq() < 1e-6) camForwardXZ.set(0, 0, -1);
+    else camForwardXZ.normalize();
+
+    const camRightXZ = new THREE.Vector3(1, 0, 0).applyQuaternion(camQuaternion);
+    camRightXZ.y = 0;
+    if (camRightXZ.lengthSq() < 1e-6) camRightXZ.set(1, 0, 0);
+    else camRightXZ.normalize();
+
+    // Extract all authored APOS actor/prop placement points (rgapos[] starting at byte 76 in CAM chunk)
+    const aposes: THREE.Vector3[] = [apos.clone()];
+    for (let off = 76; off + 12 <= camBytes.length; off += 12) {
+      const px = readFixed16(camDv, off);
+      const py = readFixed16(camDv, off + 4);
+      const pz = readFixed16(camDv, off + 8);
+      if (
+        Number.isFinite(px) &&
+        Number.isFinite(py) &&
+        Number.isFinite(pz) &&
+        Math.abs(px) < 10000 &&
+        Math.abs(py) < 10000 &&
+        Math.abs(pz) < 10000
+      ) {
+        const cand = new THREE.Vector3(px, py, pz);
+        if (!aposes.some((a) => a.distanceToSquared(cand) < 0.01)) {
+          aposes.push(cand);
+        }
+      }
+    }
+
+    let backdropDataUrl: string | null = null;
+    const mbmpMeta = bkgdsCn.findKid(targetCamMeta, 'MBMP');
+    if (mbmpMeta) {
+      const mbmpBytes = await bkgdsCn.readChunk('MBMP', mbmpMeta.cno);
+      backdropDataUrl = mbmpToDataUrl(mbmpBytes, palette);
+    }
+
+    let zbmpDepthTexture: THREE.DataTexture | null = null;
+    const zbmpMeta = bkgdsCn.findKid(targetCamMeta, 'ZBMP');
+    if (zbmpMeta) {
+      const zbmpBytes = await bkgdsCn.readChunk('ZBMP', zbmpMeta.cno);
+      const decoded = decodeZbmpToDepthTexture(zbmpBytes);
+      if (decoded) zbmpDepthTexture = decoded.texture;
+    }
+
+    // Parse GLLT lights if present
+    const lights: LoadedBackgroundView['lights'] = [];
+    const glltMeta = bkgdsCn.findKid(bkgdMeta, 'GLLT');
+    if (glltMeta) {
+      const glltBytes = await bkgdsCn.readChunk('GLLT', glltMeta.cno);
+      const gl = parseGL(glltBytes);
+      for (let i = 0; i < gl.count; i++) {
+        const o = gl.entryOffset(i);
+        const lMat = readBmat34ToMatrix4(gl.dv, o);
+        const intensity = gl.dv.byteLength >= o + 52 ? readFixed16(gl.dv, o + 48) : 1.0;
+        const type = gl.dv.byteLength >= o + 56 ? gl.dv.getInt32(o + 52, true) : 1;
+        lights.push({ type, color: 0xffffff, intensity: Math.max(0.3, intensity), matrix: lMat });
+      }
+    }
+
+    // Compute guaranteed on-screen stageOrigin for 'stage' mode across all 188 CAMs
+    const safeFov = fovDeg > 1 ? fovDeg : 47;
+    const safeHither = hither > 0.01 ? hither : 1;
+    const safeYon = yon > 10 ? yon : 5000;
+    const testCam = new THREE.PerspectiveCamera(safeFov, 544 / 306, safeHither, safeYon);
+    testCam.position.copy(camPosition);
+    testCam.quaternion.copy(camQuaternion);
+    testCam.updateMatrixWorld();
+
+    const isVisibleStagePoint = (pt: THREE.Vector3) => {
+      const dist = pt.distanceTo(camPosition);
+      if (dist < 10 || dist > safeYon * 0.85) return false;
+      const p = pt.clone().project(testCam);
+      return p.z > 0 && p.z < 1 && Math.abs(p.x) <= 0.72 && p.y >= -0.92 && p.y <= 0.48;
+    };
+
+    let stageOrigin = aposes.find(isVisibleStagePoint)?.clone();
+    if (!stageOrigin) {
+      // Fallback: project camera forward ~26 units at floor level y = apos.y
+      const camFwd3 = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuaternion);
+      const tFloor =
+        Math.abs(camFwd3.y) > 0.05 && (apos.y - camPosition.y) / camFwd3.y > 10
+          ? Math.min(48, (apos.y - camPosition.y) / camFwd3.y)
+          : 26;
+      stageOrigin = new THREE.Vector3(
+        camPosition.x + camFwd3.x * tFloor,
+        apos.y,
+        camPosition.z + camFwd3.z * tFloor
+      );
+    }
+
+    return {
+      bkgdCno,
+      bkgdName: (bkgdMeta.name || `Background ${bkgdCno}`).replace(/\s+Background$/i, ''),
+      icam,
+      fovDeg: safeFov,
+      hither: safeHither,
+      yon: safeYon,
+      apos,
+      stageOrigin,
+      aposes,
+      camMatrix,
+      camPosition,
+      camQuaternion,
+      camForwardXZ,
+      camRightXZ,
+      backdropDataUrl,
+      zbmpDepthTexture,
+      lights,
+    };
+  })();
+
+  bgViewCache.set(key, p);
+  return p;
+}
+
+let preloadPromise: Promise<void> | null = null;
+
+/**
+ * Preloads shared 3DMM archives, all scene camera views (MBMP/ZBMP/CAM), and actor/prop templates
+ * in background batches so switching scenes, camera angles, or spawning cast is instantaneous.
+ */
+export function preloadThreeDmmAssets(catalog: ThreeDmmCatalog): Promise<void> {
+  if (preloadPromise) return preloadPromise;
+
+  preloadPromise = (async () => {
+    // 1. Ensure shared archives are fetched & indexed
+    const archiveJobs = Promise.allSettled([
+      getArchive('/3dmm/3dmovie/MTRLS.3CN', false),
+      getArchive('/3dmm/3dmovie/TDFS.3CN', false),
+      getArchive('/3dmm/3dmovie/SNDS.3CN', false),
+      getArchive('/3dmm/3dmovie/SOUND.3TH', true),
+    ]);
+
+    // 2. Immediately warm all camera views of the opening scene
+    const firstScene = catalog.scenes[0];
+    if (firstScene) {
+      await Promise.allSettled(
+        firstScene.views.map((v) => loadBackgroundView(firstScene.bkgdCno, v.icam))
+      );
+    }
+
+    await archiveJobs;
+
+    // 3. Queue remaining scenes' views, then actor/prop templates in small concurrent batches
+    const tasks: (() => Promise<unknown>)[] = [];
+    for (let si = 1; si < catalog.scenes.length; si++) {
+      const sc = catalog.scenes[si];
+      for (const v of sc.views) {
+        tasks.push(() => loadBackgroundView(sc.bkgdCno, v.icam));
+      }
+    }
+    for (const actor of catalog.actors) {
+      tasks.push(() => loadTemplate(actor.tmplCno));
+    }
+    for (const prop of catalog.props) {
+      tasks.push(() => loadTemplate(prop.tmplCno));
+    }
+
+    const CONCURRENCY = 4;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < tasks.length) {
+        const job = tasks[cursor++];
+        try {
+          await job();
+        } catch {
+          // Ignore individual asset preload failures
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+  })();
+
+  return preloadPromise;
+}
+
