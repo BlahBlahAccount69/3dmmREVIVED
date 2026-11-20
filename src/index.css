@@ -1,8 +1,58 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: 'Comic Sans MS';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src:
+    local('Comic Sans MS'),
+    local('Comic Sans'),
+    url('./assets/fonts/COMICSANS.woff') format('woff');
+}
+
+@font-face {
+  font-family: 'Comic Sans MS';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src:
+    local('Comic Sans MS Italic'),
+    local('Comic Sans Italic'),
+    local('Comic Sans MS'),
+    local('Comic Sans'),
+    url('./assets/fonts/COMICSANSITALIC.woff') format('woff');
+}
+
+@font-face {
+  font-family: 'Comic Sans MS';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src:
+    local('Comic Sans MS Bold'),
+    local('Comic Sans Bold'),
+    local('Comic Sans MS'),
+    local('Comic Sans'),
+    url('./assets/fonts/COMICSANSBOLD.woff') format('woff');
+}
+
+@font-face {
+  font-family: 'Comic Sans MS';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src:
+    local('Comic Sans MS Bold Italic'),
+    local('Comic Sans Bold Italic'),
+    local('Comic Sans MS'),
+    local('Comic Sans'),
+    url('./assets/fonts/COMICSANSBOLDITALIC.woff') format('woff');
+}
+
 @layer base {
   body {
-    font-family: 'Comic Sans MS', 'Comic Neue', 'Chalkboard SE', cursive, sans-serif;
+    font-family: 'Comic Sans MS', 'Comic Sans', cursive, sans-serif;
     background-color: #16092e;
     color: #f8fafc;
     overflow: hidden;
@@ -10,7 +60,7 @@
   }
 
   button, input, select, textarea {
-    font-family: 'Comic Sans MS', 'Comic Neue', 'Chalkboard SE', cursive, sans-serif;
+    font-family: 'Comic Sans MS', 'Comic Sans', cursive, sans-serif;
   }
 }
 

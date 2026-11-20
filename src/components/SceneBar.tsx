@@ -3,6 +3,7 @@ import { Scene } from '../types/movie';
 import { CatalogSceneItem } from '../services/threeDmmEngine';
 import { sound3DMM } from '../services/soundLibrary';
 import { Plus } from 'lucide-react';
+import { assetUrl } from '../utils/assetUrl';
 
 interface SceneBarProps {
   scenes: Scene[];
@@ -33,7 +34,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
       <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 max-w-full">
         <div className="flex items-center gap-1.5 px-2 py-0.5 studio-well text-amber-300 font-bold text-[11px] shrink-0">
           <img
-            src="/3dmm/bmp/1SCEN.BMP"
+            src={assetUrl('3dmm/bmp/1SCEN.BMP')}
             alt="3DMM Scenes"
             className="h-5 w-auto object-contain inline-block image-rendering-pixelated"
           />
@@ -73,39 +74,45 @@ export const SceneBar: React.FC<SceneBarProps> = ({
             setShowAddModal(true);
           }}
           className="px-2.5 py-0.5 bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1 border-t-2 border-l-2 border-emerald-400 border-r-2 border-b-2 border-r-emerald-950 border-b-emerald-950 shadow shrink-0"
-          title="Add a new scene next to this scene (Overwrites current scene if empty)"
+          title="Add a new scene (Overwrites current scene if empty)"
         >
           <Plus size={13} />
-          <span>Add Scene Next</span>
+          <span>{scenes.length === 0 ? 'Add Scene' : 'Add Scene Next'}</span>
         </button>
       </div>
 
       {/* Quick Scene Setting Switcher (All 12 real BKGDS.3CN stages) */}
-      <div className="flex items-center gap-1.5 text-xs text-amber-200 shrink-0">
-        <span className="font-bold">Setting:</span>
-        <select
-          value={currentScene?.bkgdCno ?? 0}
-          onChange={(e) => {
-            const cno = Number(e.target.value);
-            const found = catalogScenes.find((s) => s.bkgdCno === cno);
-            if (found) {
-              void sound3DMM.playUiWav('DROPDN.WAV');
-              onUpdateCurrentScene(found);
-            }
-          }}
-          className="studio-well px-2 py-0.5 text-xs text-white focus:outline-none cursor-pointer"
-        >
-          {catalogScenes.length > 0 ? (
-            catalogScenes.map((st) => (
-              <option key={st.bkgdCno} value={st.bkgdCno}>
-                {st.name} ({st.views.length} views)
-              </option>
-            ))
-          ) : (
-            <option value={currentScene?.bkgdCno ?? 0}>{currentScene?.sceneName || 'MY-Street'}</option>
-          )}
-        </select>
-      </div>
+      {scenes.length > 0 ? (
+        <div className="flex items-center gap-1.5 text-xs text-amber-200 shrink-0">
+          <span className="font-bold">Setting:</span>
+          <select
+            value={currentScene?.bkgdCno ?? 0}
+            onChange={(e) => {
+              const cno = Number(e.target.value);
+              const found = catalogScenes.find((s) => s.bkgdCno === cno);
+              if (found) {
+                void sound3DMM.playUiWav('DROPDN.WAV');
+                onUpdateCurrentScene(found);
+              }
+            }}
+            className="studio-well px-2 py-0.5 text-xs text-white focus:outline-none cursor-pointer"
+          >
+            {catalogScenes.length > 0 ? (
+              catalogScenes.map((st) => (
+                <option key={st.bkgdCno} value={st.bkgdCno}>
+                  {st.name} ({st.views.length} views)
+                </option>
+              ))
+            ) : (
+              <option value={currentScene?.bkgdCno ?? 0}>{currentScene?.sceneName || 'MY-Street'}</option>
+            )}
+          </select>
+        </div>
+      ) : (
+        <div className="text-[11px] font-bold text-amber-300 px-2 py-0.5 studio-well shrink-0">
+          Blank Movie — Click &quot;Add Scene&quot; to start
+        </div>
+      )}
 
       {/* Add Scene Next Modal (All 12 real 3DMM backgrounds with MBMP thumbnails) */}
       {showAddModal && (
@@ -114,7 +121,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
             <div className="flex items-center justify-between pb-2.5 border-b border-purple-700/80 shrink-0">
               <div className="flex items-center gap-2">
                 <img
-                  src="/3dmm/bmp/1SCEN.BMP"
+                  src={assetUrl('3dmm/bmp/1SCEN.BMP')}
                   alt=""
                   className="h-6 w-auto object-contain image-rendering-pixelated"
                 />
@@ -135,12 +142,16 @@ export const SceneBar: React.FC<SceneBarProps> = ({
 
             <div
               className={`my-2.5 p-2 text-xs shrink-0 border ${
-                hasEntities
+                scenes.length === 0 || hasEntities
                   ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-200'
                   : 'bg-amber-950/70 border-amber-500/60 text-amber-200'
               }`}
             >
-              {hasEntities ? (
+              {scenes.length === 0 ? (
+                <span>
+                  Blank movie — adding your first scene will unlock <strong>Cast, Props, Text &amp; Sounds</strong>.
+                </span>
+              ) : hasEntities ? (
                 <span>
                   Current scene has cast/props — the chosen setting will be{' '}
                   <strong>added immediately next to it</strong>.

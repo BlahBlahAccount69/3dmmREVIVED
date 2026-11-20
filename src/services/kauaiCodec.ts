@@ -180,6 +180,9 @@ export function decodeKcdc(srcAfterFlags: Uint8Array, cbUncomp: number): Uint8Ar
         ibit += bits;
       }
 
+      adv(ibit >>> 3);
+      ibit &= 7;
+
       let t = luCur >>> ibit;
       let cbit = 0;
       while ((t & 1) !== 0) {

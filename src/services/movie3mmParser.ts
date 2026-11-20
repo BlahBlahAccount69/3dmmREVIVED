@@ -6,6 +6,7 @@ import {
   ImportedAudioCue,
   KeyframePosition,
   Movie,
+  PropActionKeyframe,
   PropEntity,
   Scene,
   ScreenTextBox,
@@ -21,6 +22,7 @@ import {
   ParsedAction,
 } from './threeDmmEngine';
 import { sound3DMM } from './soundLibrary';
+import { loadBasePalette } from './mbmpDecoder';
 import * as THREE from 'three';
 
 export const OFFICIAL_SAMPLE_MOVIES = [
@@ -90,15 +92,22 @@ function evalPathTangentYaw(nodes: PathNode[], irpt: number): number | null {
 }
 
 const _tmpMat = new THREE.Matrix4();
-const _tmpForward = new THREE.Vector3();
+const _bmatPos = new THREE.Vector3();
+const _bmatQuat = new THREE.Quaternion();
+const _bmatScale = new THREE.Vector3();
+const _bmatEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
-function yawFromBmat34(dv: DataView, byteOffset: number): number {
-  readBmat34ToMatrix4(dv, byteOffset, _tmpMat);
-  _tmpForward.set(0, 0, 1).applyMatrix4(_tmpMat).sub(
-    new THREE.Vector3().setFromMatrixPosition(_tmpMat)
-  );
-  if (Math.hypot(_tmpForward.x, _tmpForward.z) < 1e-4) return 0;
-  return Math.atan2(_tmpForward.x, _tmpForward.z);
+function rotScaleFromBmat34(dv: DataView, byteOffset: number) {
+  readBmat34ToMatrix4(dv, byteOffset, _tmpMat).decompose(_bmatPos, _bmatQuat, _bmatScale);
+  _bmatEuler.setFromQuaternion(_bmatQuat, 'YXZ');
+  return {
+    rotX: _bmatEuler.x,
+    rotY: _bmatEuler.y,
+    rotZ: _bmatEuler.z,
+    scaleX: _bmatScale.x,
+    scaleY: _bmatScale.y,
+    scaleZ: _bmatScale.z,
+  };
 }
 
 /**
@@ -110,12 +119,21 @@ export async function loadOfficial3mmMovie(
   source: string | ArrayBuffer,
   fallbackTitle = '3DMM Movie'
 ): Promise<Movie> {
-  const [catalog, chunky] = await Promise.all([
+  const [catalog, basePalette, chunky] = await Promise.all([
     loadThreeDmmCatalog(),
+    loadBasePalette(),
     typeof source === 'string'
       ? ChunkyFile.fromUrl(source, true)
       : Promise.resolve(ChunkyFile.fromBuffer(source)),
   ]);
+
+  const socpalHex = (idx: number): string => {
+    const c = Math.max(0, Math.min(255, idx | 0));
+    const r = basePalette[c * 3 + 0] ?? 249;
+    const g = basePalette[c * 3 + 1] ?? 249;
+    const b = basePalette[c * 3 + 2] ?? 249;
+    return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
+  };
 
   const mvieMeta = chunky.getChunksByType('MVIE')[0];
   const scenKids = mvieMeta
@@ -194,21 +212,46 @@ export async function loadOfficial3mmMovie(
           const fLoop = gg.dv.getInt32(entry.varOffset + 8, true) !== 0 || sty === 4;
           const ctagc = Math.max(1, gg.dv.getInt32(entry.varOffset + 12, true));
 
+          const cnoList: number[] = [];
           for (let t = 0; t < ctagc; t++) {
             const base = entry.varOffset + 16 + t * 20;
             if (base + 20 > entry.varOffset + entry.varLength) break;
             const tagCtg = readTagReversed(gg.data, base + 12);
             const msndCno = gg.dv.getUint32(base + 16, true);
-            if (tagCtg === 'MSND' && msndCno > 0) {
-              audios.push({
-                id: `snd_${sIdx}_${i}_${t}`,
-                frame: relFrame,
-                filename: `${sty === 4 ? 'Music' : 'Sound'} #${msndCno}`,
-                audioData: '',
-                loop: fLoop,
-                msndCno,
-              });
+            if (tagCtg === 'MSND') {
+              cnoList.push(msndCno);
             }
+          }
+
+          if (cnoList.length === 1) {
+            const msndCno = cnoList[0];
+            const isStopper = msndCno === 20479 || msndCno === 12707;
+            audios.push({
+              id: `snd_${sIdx}_${i}_0`,
+              frame: relFrame,
+              filename: isStopper
+                ? msndCno === 20479
+                  ? 'Stop Music'
+                  : 'Stop Sound'
+                : `${sty === 4 ? 'Music' : 'Sound'} #${msndCno}`,
+              audioData: '',
+              isMidi: sty === 4 || msndCno === 20479,
+              loop: fLoop && !isStopper,
+              msndCno,
+              isStopper,
+            });
+          } else if (cnoList.length > 1) {
+            // Multiple TAGC entries on a single SSE represent an ordered sequence/playlist
+            audios.push({
+              id: `snd_${sIdx}_${i}_seq`,
+              frame: relFrame,
+              filename: `${sty === 4 ? 'Music Sequence' : 'Sound Sequence'} (${cnoList.length})`,
+              audioData: '',
+              isMidi: sty === 4,
+              loop: fLoop,
+              msndCno: cnoList[0],
+              playlist: cnoList.map((cno) => ({ name: `${cno}`, msndCno: cno } as { audioData?: string; midiData?: string; isMidi?: boolean; name?: string; msndCno?: number })),
+            });
           }
         }
       }
@@ -243,7 +286,19 @@ export async function loadOfficial3mmMovie(
 
       for (const rtxKid of chunky.findKids(tbMeta, 'RTXT')) {
         const rtxBytes = await chunky.readChunk('RTXT', rtxKid.meta.cno);
+        const rtxDv = new DataView(rtxBytes.buffer, rtxBytes.byteOffset, rtxBytes.byteLength);
         let fontName = 'Comic Sans MS';
+        let baseFontSize = rtxBytes.length >= 12 ? rtxDv.getInt32(8, true) || 14 : 14;
+        if (baseFontSize < 8 || baseFontSize > 72) baseFontSize = 14;
+
+        let bgColor: string | undefined;
+        if (rtxBytes.length >= 16) {
+          const bgAcr = rtxDv.getUint32(12, true);
+          if ((bgAcr >>> 24) === 0xfe) {
+            bgColor = socpalHex(bgAcr & 0xff);
+          }
+        }
+
         if (rtxBytes.length >= 20) {
           const strLen = rtxBytes[18];
           if (strLen > 0 && 19 + strLen <= rtxBytes.length) {
@@ -254,6 +309,58 @@ export async function loadOfficial3mmMovie(
               .replace(/\0/g, '')
               .trim();
             if (parsedFont) fontName = parsedFont;
+          }
+        }
+
+        // Parse child AGPA font table & GLMP rich-text runs (size, bold, italic, font family, color)
+        const agpaFonts = new Map<number, string>();
+        for (const agKid of chunky.findKids(rtxKid.meta, 'AGPA')) {
+          const agBytes = await chunky.readChunk('AGPA', agKid.meta.cno);
+          if (agBytes.length >= 34) {
+            const len = agBytes[32];
+            if (len > 0 && 33 + len <= agBytes.length) {
+              const nm = Array.from(agBytes.subarray(33, 33 + len), (b) =>
+                String.fromCharCode(b)
+              )
+                .join('')
+                .replace(/\0/g, '')
+                .trim();
+              if (nm) agpaFonts.set(agKid.kid.chid + 1, nm);
+            }
+          }
+        }
+
+        let fontSize = baseFontSize;
+        let bold = false;
+        let italic = false;
+        let color: string | undefined;
+
+        const glmpKid = chunky.findKid(rtxKid.meta, 'GLMP');
+        if (glmpKid) {
+          const glmp = parseGL(await chunky.readChunk('GLMP', glmpKid.cno));
+          let sawChp = false;
+          let sawFont = false;
+          let sawColor = false;
+          for (let gi = 0; gi < glmp.count; gi++) {
+            const go = glmp.entryOffset(gi);
+            const tag = glmp.data[go + 3];
+            const a = glmp.dv.getInt16(go + 4, true);
+            const b = glmp.dv.getInt16(go + 6, true);
+            if (tag === 1 && !sawChp) {
+              bold = (a & 1) !== 0;
+              italic = (a & 2) !== 0;
+              fontSize = Math.max(8, Math.min(72, baseFontSize + b));
+              sawChp = true;
+            } else if (tag === 2 && a > 0 && !sawFont) {
+              const agName = agpaFonts.get(a);
+              if (agName) {
+                fontName = agName;
+                sawFont = true;
+              }
+            } else if (tag === 3 && a > 0 && !sawColor) {
+              color = socpalHex(a & 0xff);
+              sawColor = true;
+            }
           }
         }
 
@@ -279,6 +386,11 @@ export async function loadOfficial3mmMovie(
             id: `tbox_${sIdx}_${tIdx}_${tbMeta.cno}`,
             text: textParts.join('\n'),
             fontName,
+            fontSize,
+            color,
+            bgColor,
+            bold,
+            italic,
             startFrame,
             endFrame,
             left,
@@ -391,14 +503,21 @@ export async function loadOfficial3mmMovie(
             const fNoSound = gg.dv.getInt32(e.varOffset + 20, true) !== 0;
             const ctg = readTagReversed(gg.data, e.varOffset + 36);
             const msndCno = gg.dv.getUint32(e.varOffset + 40, true);
-            if (!fNoSound && ctg === 'MSND' && msndCno > 0) {
+            if (!fNoSound && ctg === 'MSND') {
+              const isStopper = msndCno === 20479 || msndCno === 12707;
               audios.push({
                 id: `asnd_${sIdx}_${aIdx}_${i}`,
                 frame: f,
-                filename: `${inActorCat?.name || inPropCat?.name || 'Actor'} Sound #${msndCno}`,
+                filename: isStopper
+                  ? msndCno === 20479
+                    ? 'Stop Music'
+                    : 'Stop Sound'
+                  : `${inActorCat?.name || inPropCat?.name || 'Actor'} Sound #${msndCno}`,
                 audioData: '',
-                loop: fLoop || sty === 4,
+                isMidi: sty === 4 || msndCno === 20479,
+                loop: (fLoop || sty === 4) && !isStopper,
                 msndCno,
+                isStopper,
               });
             }
           }
@@ -427,7 +546,9 @@ export async function loadOfficial3mmMovie(
         let curDwrOff = 0;
         let forcedStep: number | null = null;
         let isFrozen = false;
+        let staticRotX = 0;
         let staticRotY = 0;
+        let staticRotZ = 0;
         let useStaticRot = true;
         let onStage = false;
         let sizeScale = 1;
@@ -438,15 +559,13 @@ export async function loadOfficial3mmMovie(
         let matScaleY = 1;
         let matScaleZ = 1;
         let tweakedPos: { x: number; y: number; z: number } | null = null;
-        const _bmatDecPos = new THREE.Vector3();
-        const _bmatDecQuat = new THREE.Quaternion();
-        const _bmatDecScale = new THREE.Vector3();
 
         const getActionName = (anid: number) =>
           tmplObj?.actions.find((a) => a.anid === anid)?.name ||
           (anid === 0 ? 'At Rest' : `Action ${anid}`);
 
         for (let f = 0; f <= totalFrames; f++) {
+          let explicitRotThisFrame = false;
           const evs = eventsByFrame.get(f);
           if (evs) {
             for (const ev of evs) {
@@ -457,12 +576,15 @@ export async function loadOfficial3mmMovie(
                     subX = readFixed16(gg.dv, ev.varOffset + 0);
                     subY = readFixed16(gg.dv, ev.varOffset + 4);
                     subZ = readFixed16(gg.dv, ev.varOffset + 8);
+                    staticRotX = 0;
+                    staticRotZ = 0;
                     if (ev.varLength >= 16) {
                       staticRotY = (gg.dv.getInt16(ev.varOffset + 14, true) * Math.PI * 2) / 65536;
                     }
                     curIrpt = Math.max(0, ev.irpt);
                     curDwrOff = Math.max(0, ev.dwrOffset);
                     useStaticRot = true;
+                    explicitRotThisFrame = true;
                     onStage = true;
                   }
                   break;
@@ -514,24 +636,23 @@ export async function loadOfficial3mmMovie(
                   break;
                 }
                 case 3: {
-                  // aetRotF
+                  // aetRotF (full 3D frame orientation)
                   if (ev.varLength >= 48) {
-                    staticRotY = yawFromBmat34(gg.dv, ev.varOffset);
-                    readBmat34ToMatrix4(gg.dv, ev.varOffset, _tmpMat).decompose(
-                      _bmatDecPos,
-                      _bmatDecQuat,
-                      _bmatDecScale
-                    );
+                    const dec = rotScaleFromBmat34(gg.dv, ev.varOffset);
+                    staticRotX = dec.rotX;
+                    staticRotY = dec.rotY;
+                    staticRotZ = dec.rotZ;
                     if (
-                      Math.abs(_bmatDecScale.x - 1) > 0.03 ||
-                      Math.abs(_bmatDecScale.y - 1) > 0.03 ||
-                      Math.abs(_bmatDecScale.z - 1) > 0.03
+                      Math.abs(dec.scaleX - 1) > 0.03 ||
+                      Math.abs(dec.scaleY - 1) > 0.03 ||
+                      Math.abs(dec.scaleZ - 1) > 0.03
                     ) {
-                      matScaleX = Math.max(0.05, _bmatDecScale.x);
-                      matScaleY = Math.max(0.05, _bmatDecScale.y);
-                      matScaleZ = Math.max(0.05, _bmatDecScale.z);
+                      matScaleX = Math.max(0.05, dec.scaleX);
+                      matScaleY = Math.max(0.05, dec.scaleY);
+                      matScaleZ = Math.max(0.05, dec.scaleZ);
                     }
                     useStaticRot = false;
+                    explicitRotThisFrame = true;
                   }
                   break;
                 }
@@ -552,24 +673,23 @@ export async function loadOfficial3mmMovie(
                   break;
                 }
                 case 12: {
-                  // aetRotH
+                  // aetRotH (full 3D held orientation)
                   if (ev.varLength >= 48) {
-                    staticRotY = yawFromBmat34(gg.dv, ev.varOffset);
-                    readBmat34ToMatrix4(gg.dv, ev.varOffset, _tmpMat).decompose(
-                      _bmatDecPos,
-                      _bmatDecQuat,
-                      _bmatDecScale
-                    );
+                    const dec = rotScaleFromBmat34(gg.dv, ev.varOffset);
+                    staticRotX = dec.rotX;
+                    staticRotY = dec.rotY;
+                    staticRotZ = dec.rotZ;
                     if (
-                      Math.abs(_bmatDecScale.x - 1) > 0.03 ||
-                      Math.abs(_bmatDecScale.y - 1) > 0.03 ||
-                      Math.abs(_bmatDecScale.z - 1) > 0.03
+                      Math.abs(dec.scaleX - 1) > 0.03 ||
+                      Math.abs(dec.scaleY - 1) > 0.03 ||
+                      Math.abs(dec.scaleZ - 1) > 0.03
                     ) {
-                      matScaleX = Math.max(0.05, _bmatDecScale.x);
-                      matScaleY = Math.max(0.05, _bmatDecScale.y);
-                      matScaleZ = Math.max(0.05, _bmatDecScale.z);
+                      matScaleX = Math.max(0.05, dec.scaleX);
+                      matScaleY = Math.max(0.05, dec.scaleY);
+                      matScaleZ = Math.max(0.05, dec.scaleZ);
                     }
                     useStaticRot = true;
+                    explicitRotThisFrame = true;
                   }
                   break;
                 }
@@ -632,7 +752,10 @@ export async function loadOfficial3mmMovie(
 
           const pPos = tweakedPos || evalPathPos(pathNodes, curIrpt, curDwrOff);
           tweakedPos = null;
-          const tangYaw = !useStaticRot ? evalPathTangentYaw(pathNodes, curIrpt) : null;
+          const tangYaw =
+            !useStaticRot && !explicitRotThisFrame
+              ? evalPathTangentYaw(pathNodes, curIrpt)
+              : null;
           const rotY = tangYaw !== null ? tangYaw : staticRotY;
 
           const sx = sizeScale * pullX * matScaleX;
@@ -647,6 +770,8 @@ export async function loadOfficial3mmMovie(
             z: subZ + pPos.z,
             rotY,
           };
+          if (Math.abs(staticRotX) > 0.005) kfEntry.rotX = staticRotX;
+          if (Math.abs(staticRotZ) > 0.005) kfEntry.rotZ = staticRotZ;
           if (hasNonUnitScale) {
             kfEntry.scaleX = sx;
             kfEntry.scaleY = sy;
@@ -686,19 +811,48 @@ export async function loadOfficial3mmMovie(
         keyframes[0] = { x: actrBaseX, y: actrBaseY, z: actrBaseZ, rotY: 0 };
       }
 
-      // Compress identical consecutive stationary keyframes while keeping all motion, scale, & visibility frames intact
+      // Apply optional per-keyframe COLR chunk (for custom & interpolated prop/shape colors)
+      const colrKid = chunky.findKid(actrMeta, 'COLR');
+      const colorByFrame = new Map<number, string>();
+      if (colrKid) {
+        try {
+          const colrBytes = await chunky.readChunk('COLR', colrKid.cno);
+          const jsonStr = new TextDecoder().decode(colrBytes);
+          const parsedColrs = JSON.parse(jsonStr) as Record<string, string>;
+          Object.entries(parsedColrs).forEach(([fk, hex]) => {
+            if (typeof hex === 'string' && hex.startsWith('#')) {
+              colorByFrame.set(Number(fk), hex);
+            }
+          });
+        } catch {
+          // ignore malformed COLR
+        }
+      }
+
+      // Compress identical consecutive stationary keyframes while keeping all motion, scale, color & visibility frames intact
       const sparseKeyframes: Record<number, KeyframePosition> = {};
-      const sortedF = Object.keys(keyframes).map(Number).sort((a, b) => a - b);
+      const allFrameNums = Array.from(
+        new Set([
+          ...Object.keys(keyframes).map(Number),
+          ...Array.from(colorByFrame.keys()),
+        ])
+      ).sort((a, b) => a - b);
+
       let lastSaved: KeyframePosition | null = null;
-      for (const f of sortedF) {
-        const cur = keyframes[f];
+      for (const f of allFrameNums) {
+        const baseKf = keyframes[f] || (lastSaved ? { ...lastSaved } : { x: actrBaseX, y: actrBaseY, z: actrBaseZ, rotY: 0 });
+        const explicitColor = colorByFrame.get(f);
+        const cur: KeyframePosition = explicitColor ? { ...baseKf, color: explicitColor } : baseKf;
         if (
           !lastSaved ||
+          explicitColor !== undefined ||
           (cur.visible !== false) !== (lastSaved.visible !== false) ||
           Math.abs(cur.x - lastSaved.x) > 0.005 ||
           Math.abs(cur.y - lastSaved.y) > 0.005 ||
           Math.abs(cur.z - lastSaved.z) > 0.005 ||
+          Math.abs((cur.rotX ?? 0) - (lastSaved.rotX ?? 0)) > 0.005 ||
           Math.abs(cur.rotY - lastSaved.rotY) > 0.005 ||
+          Math.abs((cur.rotZ ?? 0) - (lastSaved.rotZ ?? 0)) > 0.005 ||
           Math.abs((cur.scaleX ?? 1) - (lastSaved.scaleX ?? 1)) > 0.005 ||
           Math.abs((cur.scaleY ?? 1) - (lastSaved.scaleY ?? 1)) > 0.005 ||
           Math.abs((cur.scaleZ ?? 1) - (lastSaved.scaleZ ?? 1)) > 0.005
@@ -720,11 +874,31 @@ export async function loadOfficial3mmMovie(
           });
         }
       } else if (inPropCat) {
+        const propAkfs: Record<number, PropActionKeyframe> = {};
+        Object.entries(actionKeyframes).forEach(([fk, av]) => {
+          propAkfs[Number(fk)] = {
+            action: av.actionName,
+            anid: av.anid,
+            celOffset: av.celOffset,
+            freeze: av.freeze,
+          };
+        });
+        const defPropActName =
+          Object.keys(actionKeyframes).length > 0
+            ? firstActionName
+            : tmplObj?.actions[0]?.name || 'At Rest';
+        const defPropAnid =
+          Object.keys(actionKeyframes).length > 0
+            ? firstAnid
+            : (tmplObj?.actions[0]?.anid ?? 0);
+
         props.push({
           id: `prop_${sIdx}_${aIdx}_${tmplCno}`,
           tmplCno,
           name: inPropCat.name,
-          action: 'at rest',
+          action: defPropActName,
+          anid: defPropAnid,
+          actionKeyframes: Object.keys(propAkfs).length > 0 ? propAkfs : undefined,
           costumeCmids: costumeCmids.length > 0 ? costumeCmids : undefined,
           costumeMtrls: costumeMtrls.length > 0 ? costumeMtrls : undefined,
           keyframes: sparseKeyframes,
@@ -744,15 +918,40 @@ export async function loadOfficial3mmMovie(
       }
     }
 
-    // Hydrate audioData (WAV) OR midiData (MIDS) for all extracted MSND cues so audio & MIDI play seamlessly
+    // Hydrate audioData (WAV) OR midiData (MIDS) for all extracted MSND cues (including custom MSND:0, playlists & stoppers)
     const dedupedAudios: ImportedAudioCue[] = [];
     const seenAudioKeys = new Set<string>();
     for (const cue of audios) {
-      const k = `${cue.frame}:${cue.msndCno}`;
+      const k = `${cue.frame}:${cue.msndCno}:${cue.playlist ? cue.playlist.length : 1}`;
       if (seenAudioKeys.has(k)) continue;
       seenAudioKeys.add(k);
 
-      if (cue.msndCno) {
+      if (cue.isStopper) {
+        dedupedAudios.push(cue);
+        continue;
+      }
+
+      if (cue.playlist && cue.playlist.length > 0) {
+        const hydratedList: NonNullable<ImportedAudioCue['playlist']> = [];
+        for (const item of cue.playlist) {
+          const subCno = (item as { msndCno?: number }).msndCno;
+          if (subCno !== undefined) {
+            const ex = await sound3DMM.extractMsndCueData(subCno, chunky);
+            if (ex) hydratedList.push(ex);
+          }
+        }
+        if (hydratedList.length > 0) {
+          cue.playlist = hydratedList;
+          cue.isMidi = Boolean(hydratedList[0].isMidi);
+          cue.midiData = hydratedList[0].midiData;
+          cue.audioData = hydratedList[0].audioData || '';
+          cue.filename = hydratedList.map((h) => h.name || '').filter(Boolean).join(' -> ') || cue.filename;
+          dedupedAudios.push(cue);
+        }
+        continue;
+      }
+
+      if (cue.msndCno !== undefined && cue.msndCno >= 0) {
         const extracted = await sound3DMM.extractMsndCueData(cue.msndCno, chunky);
         if (extracted) {
           if (extracted.audioData) cue.audioData = extracted.audioData;

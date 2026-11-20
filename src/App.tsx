@@ -9,6 +9,8 @@ import {
   PropAction,
   PropEntity,
   Scene,
+  ScreenTextBox,
+  TdtTextEntity,
 } from './types/movie';
 import { createDefaultMovie, createEmptyScene } from './services/defaultMovie';
 import {
@@ -16,15 +18,18 @@ import {
   CatalogPropItem,
   CatalogSceneItem,
   LoadedBackgroundView,
+  loadTemplate,
   loadThreeDmmCatalog,
   preloadThreeDmmAssets,
   ThreeDmmCatalog,
 } from './services/threeDmmEngine';
 import { loadOfficial3mmMovie, OFFICIAL_SAMPLE_MOVIES } from './services/movie3mmParser';
+import { exportMovieTo3mmBytes } from './services/movie3mmWriter';
 import { sound3DMM } from './services/soundLibrary';
 import {
   resolveActiveCameraAtFrame,
   resolveInterpolatedKeyframe,
+  StageEntityType,
   Viewport3D,
 } from './components/Viewport3D';
 import { SceneBar } from './components/SceneBar';
@@ -32,7 +37,8 @@ import { CameraAngleBar } from './components/CameraAngleBar';
 import { ActorPropPanel } from './components/ActorPropPanel';
 import { TimelineBar } from './components/TimelineBar';
 import { AudioImportModal } from './components/AudioImportModal';
-import { Film, FolderOpen, Save } from 'lucide-react';
+import { assetUrl } from './utils/assetUrl';
+import { FilePlus, Film, FolderOpen, Save } from 'lucide-react';
 
 export default function App() {
   const [movie, setMovie] = useState<Movie>(createDefaultMovie);
@@ -43,29 +49,47 @@ export default function App() {
   });
   const [currentSceneIndex, setCurrentSceneIndex] = useState(0);
   const [currentFrame, setCurrentFrame] = useState(0);
+  const [renderFrame, setRenderFrame] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>('actor_bongo_1');
-  const [selectedEntityType, setSelectedEntityType] = useState<'actor' | 'prop' | null>('actor');
+  const [selectedEntityType, setSelectedEntityType] = useState<
+    'actor' | 'prop' | 'tdt' | 'tbox' | null
+  >('actor');
 
+  const [moveUpDownMode, setMoveUpDownMode] = useState(false);
+  const [rotateMode, setRotateMode] = useState(false);
   const [isRecordingMovement, setIsRecordingMovement] = useState(false);
   const [mobileTab, setMobileTab] = useState<'stage' | 'cast'>('stage');
   const [isAudioModalOpen, setIsAudioModalOpen] = useState(false);
   const [showSamplesModal, setShowSamplesModal] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Loading real Microsoft 3DMM assets...');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stageViewRef = useRef<LoadedBackgroundView | null>(null);
 
-  const currentScene = movie.scenes[currentSceneIndex] || movie.scenes[0];
-  const activeCatalogScene =
-    catalog.scenes.find((s) => s.bkgdCno === currentScene.bkgdCno) || catalog.scenes[0];
-  const activeCamAtFrame = resolveActiveCameraAtFrame(currentScene, currentFrame);
+  const currentScene: Scene | undefined = movie.scenes[currentSceneIndex] || movie.scenes[0];
+  const hasScene = Boolean(currentScene);
+  const activeCatalogScene = hasScene
+    ? catalog.scenes.find((s) => s.bkgdCno === currentScene!.bkgdCno) || catalog.scenes[0]
+    : undefined;
+  const activeCamAtFrame = hasScene
+    ? resolveActiveCameraAtFrame(currentScene!, currentFrame)
+    : { icam: 0, yaw: 0, pitch: 0 };
 
   const movieRef = useRef(movie);
   movieRef.current = movie;
-  const playheadRef = useRef({ sceneIndex: currentSceneIndex, frame: currentFrame });
-  playheadRef.current = { sceneIndex: currentSceneIndex, frame: currentFrame };
+  const playheadRef = useRef({
+    sceneIndex: currentSceneIndex,
+    frame: currentFrame,
+    renderFrame,
+  });
+  if (!isPlaying) {
+    playheadRef.current.sceneIndex = currentSceneIndex;
+    playheadRef.current.frame = currentFrame;
+    playheadRef.current.renderFrame = renderFrame;
+  }
 
   // Load real 3DMM Catalog & preload scenes, views, templates, sound catalog, UI WAVs, and MS GS Wavetable SoundFont
   useEffect(() => {
@@ -77,7 +101,7 @@ export default function App() {
       'ADDFRAME.WAV', 'CBACKS.WAV', 'RECFRAME.WAV', 'FSAVE.WAV', 'FNEW.WAV', 'ALERT2.WAV',
       'MAPOPEN.WAV',
     ]);
-    void fetch('/3dmm/soundfont/MS_GS_Wavetable.sf2').catch(() => {});
+    void fetch(assetUrl('3dmm/soundfont/MS_GS_Wavetable.sf2')).catch(() => {});
 
     loadThreeDmmCatalog()
       .then((cat) => {
@@ -93,7 +117,7 @@ export default function App() {
       })
       .catch((err) => {
         console.error('Failed loading 3DMM catalog:', err);
-        setStatusMessage('Error loading 3DMM assets from /3dmm/3dmovie/.');
+        setStatusMessage('Error loading 3DMM assets from 3dmm/3dmovie/.');
       });
   }, []);
 
@@ -105,66 +129,171 @@ export default function App() {
     }
   };
 
-  // Multi-scene authentic 6 FPS Playback (#define kfps 6 in SOCDEF.H)
+  // Silky display-synced playback (60-120+ FPS continuous subframes over 6 FPS 3DMM keyframes)
   useEffect(() => {
     if (!isPlaying) return;
 
-    const intervalId = window.setInterval(() => {
+    let rafId = 0;
+    let lastNow = performance.now();
+
+    const step = (now: number) => {
+      const dt = Math.min(0.08, Math.max(0, (now - lastNow) / 1000));
+      lastNow = now;
+
       const scenes = movieRef.current.scenes;
-      if (!scenes || scenes.length === 0) return;
+      if (scenes && scenes.length > 0) {
+        let { sceneIndex, frame: intFrame, renderFrame: subFrame } = playheadRef.current;
+        if (sceneIndex < 0 || sceneIndex >= scenes.length) sceneIndex = 0;
 
-      let { sceneIndex, frame } = playheadRef.current;
-      if (sceneIndex < 0 || sceneIndex >= scenes.length) sceneIndex = 0;
+        const activeScene = scenes[sceneIndex];
+        let nextRender = subFrame + dt * 6.0;
+        let nextIntFrame = Math.floor(nextRender + 1e-6);
+        let nextSceneIndex = sceneIndex;
 
-      const activeScene = scenes[sceneIndex];
-      let nextFrame = frame + 1;
-      let nextSceneIndex = sceneIndex;
+        if (nextIntFrame > activeScene.totalFrames) {
+          if (sceneIndex + 1 < scenes.length) {
+            nextSceneIndex = sceneIndex + 1;
+            nextRender = 0;
+            nextIntFrame = 0;
+            // Stop looping SFX at scene cuts while preserving background music continuity
+            sound3DMM.stopLoopingSfx();
+          } else {
+            // Reached the end of the final scene: stop playback cleanly without repeating
+            const endFrame = activeScene.totalFrames;
+            playheadRef.current = {
+              sceneIndex,
+              frame: endFrame,
+              renderFrame: endFrame,
+            };
+            sound3DMM.stopAll();
+            setCurrentFrame(endFrame);
+            setRenderFrame(endFrame);
+            setIsPlaying(false);
+            return;
+          }
+        }
 
-      if (nextFrame > activeScene.totalFrames) {
-        nextSceneIndex = (sceneIndex + 1) % scenes.length;
-        nextFrame = 0;
-        sound3DMM.stopMusic();
+        playheadRef.current.sceneIndex = nextSceneIndex;
+        playheadRef.current.frame = nextIntFrame;
+        playheadRef.current.renderFrame = nextRender;
+
+        if (nextSceneIndex !== sceneIndex) {
+          setCurrentSceneIndex(nextSceneIndex);
+          setSelectedEntityId(null);
+          setSelectedEntityType(null);
+          setStatusMessage(
+            `Playing Scene ${nextSceneIndex + 1}/${scenes.length}: ${scenes[nextSceneIndex].sceneName}`
+          );
+        }
+
+        if (nextIntFrame !== intFrame || nextSceneIndex !== sceneIndex) {
+          setCurrentFrame(nextIntFrame);
+          triggerAudiosForFrame(scenes[nextSceneIndex], nextIntFrame);
+        }
       }
 
-      playheadRef.current = { sceneIndex: nextSceneIndex, frame: nextFrame };
+      rafId = window.requestAnimationFrame(step);
+    };
 
-      if (nextSceneIndex !== sceneIndex) {
-        setCurrentSceneIndex(nextSceneIndex);
-        setSelectedEntityId(null);
-        setSelectedEntityType(null);
-        setStatusMessage(
-          `Playing Scene ${nextSceneIndex + 1}/${scenes.length}: ${scenes[nextSceneIndex].sceneName}`
-        );
-      }
-      setCurrentFrame(nextFrame);
-      triggerAudiosForFrame(scenes[nextSceneIndex], nextFrame);
-    }, 1000 / 6);
-
-    return () => window.clearInterval(intervalId);
+    rafId = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(rafId);
   }, [isPlaying]);
 
   const handleTogglePlay = () => {
+    if (!hasScene) return;
     if (isPlaying) {
       sound3DMM.stopAll();
+      const activeScene = movieRef.current.scenes[playheadRef.current.sceneIndex];
+      const maxF = activeScene ? activeScene.totalFrames : 0;
+      const stoppedFrame = Math.max(
+        0,
+        Math.min(maxF, Math.round(playheadRef.current.renderFrame))
+      );
+      playheadRef.current.frame = stoppedFrame;
+      playheadRef.current.renderFrame = stoppedFrame;
       setIsPlaying(false);
+      setCurrentFrame(stoppedFrame);
+      setRenderFrame(stoppedFrame);
       return;
     }
     setIsRecordingMovement(false);
-    if (currentFrame === 0 && currentScene) {
-      triggerAudiosForFrame(currentScene, 0);
+    const atVeryEnd =
+      currentSceneIndex >= movie.scenes.length - 1 &&
+      currentFrame >= (currentScene?.totalFrames ?? 0);
+    const startSceneIdx = atVeryEnd ? 0 : currentSceneIndex;
+    const startFrame = atVeryEnd ? 0 : currentFrame;
+    const startScene = movie.scenes[startSceneIdx] || currentScene;
+    if (atVeryEnd && currentSceneIndex !== 0) {
+      setCurrentSceneIndex(0);
+    }
+    setCurrentFrame(startFrame);
+    setRenderFrame(startFrame);
+    playheadRef.current = {
+      sceneIndex: startSceneIdx,
+      frame: startFrame,
+      renderFrame: startFrame,
+    };
+    if (startFrame === 0 && startScene) {
+      triggerAudiosForFrame(startScene, 0);
     }
     setIsPlaying(true);
   };
 
   const handleSeekFrame = (frame: number) => {
-    setCurrentFrame(frame);
-    triggerAudiosForFrame(currentScene, frame);
+    if (!currentScene) return;
+    const clamped = Math.max(0, Math.min(currentScene.totalFrames, Math.round(frame)));
+    playheadRef.current.frame = clamped;
+    playheadRef.current.renderFrame = clamped;
+    setCurrentFrame(clamped);
+    setRenderFrame(clamped);
+    triggerAudiosForFrame(currentScene, clamped);
   };
 
-  // Add Scene Next Rule: add next if scene has actors/props, overwrite if empty
+  // Start a completely blank movie (black screen, no objects/sounds until Scene 1 is added)
+  const handleNewBlankMovie = () => {
+    sound3DMM.stopAll();
+    setIsPlaying(false);
+    setIsRecordingMovement(false);
+    setIsAudioModalOpen(false);
+    setMoveUpDownMode(false);
+    setRotateMode(false);
+    setMovie({
+      title: 'Untitled Movie',
+      scenes: [],
+    });
+    setCurrentSceneIndex(0);
+    setCurrentFrame(0);
+    setRenderFrame(0);
+    playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+    setSelectedEntityId(null);
+    setSelectedEntityType(null);
+    setMobileTab('stage');
+    void sound3DMM.playUiWav('FNEW.WAV');
+    setStatusMessage('Started a blank movie — click "Add Scene" above to unlock actors, props, words & sounds.');
+  };
+
+  // Add Scene Next Rule: add first scene if blank, overwrite if empty, or insert next
   const handleAddOrOverwriteScene = (chosen: CatalogSceneItem) => {
     sound3DMM.stopMusic();
-    const hasEntities = currentScene.actors.length > 0 || currentScene.props.length > 0;
+    if (movie.scenes.length === 0 || !currentScene) {
+      const firstScene = createEmptyScene(chosen.bkgdCno, chosen.name, 0);
+      setMovie({ ...movie, scenes: [firstScene] });
+      setCurrentSceneIndex(0);
+      setCurrentFrame(0);
+      setRenderFrame(0);
+      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      setSelectedEntityId(null);
+      setSelectedEntityType(null);
+      setIsRecordingMovement(false);
+      setStatusMessage(`Added Scene 1: "${chosen.name}". Stage tools and sounds are now enabled!`);
+      return;
+    }
+
+    const hasEntities =
+      currentScene.actors.length > 0 ||
+      currentScene.props.length > 0 ||
+      (currentScene.tdtTexts?.length || 0) > 0 ||
+      (currentScene.textBoxes?.length || 0) > 0;
     if (!hasEntities) {
       const updated = [...movie.scenes];
       updated[currentSceneIndex] = {
@@ -183,6 +312,8 @@ export default function App() {
       setMovie({ ...movie, scenes: updated });
       setCurrentSceneIndex(currentSceneIndex + 1);
       setCurrentFrame(0);
+      setRenderFrame(0);
+      playheadRef.current = { sceneIndex: currentSceneIndex + 1, frame: 0, renderFrame: 0 };
       setSelectedEntityId(null);
       setSelectedEntityType(null);
       setIsRecordingMovement(false);
@@ -191,6 +322,7 @@ export default function App() {
   };
 
   const handleUpdateCurrentScene = (chosen: CatalogSceneItem) => {
+    if (!currentScene) return;
     sound3DMM.stopMusic();
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
@@ -206,6 +338,7 @@ export default function App() {
 
   // Supports BOTH setting View at frame 0 AND adding camera angle cuts at any frame > 0!
   const handleSelectCameraView = (icam: number) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     if (currentFrame === 0 && (!currentScene.cameraCuts || currentScene.cameraCuts.length <= 1)) {
       updated[currentSceneIndex] = {
@@ -221,7 +354,14 @@ export default function App() {
       const baseCuts: CameraCutEvent[] =
         currentScene.cameraCuts && currentScene.cameraCuts.length > 0
           ? [...currentScene.cameraCuts]
-          : [{ frame: 0, icam: currentScene.icam, yaw: currentScene.cameraAngle.yaw, pitch: currentScene.cameraAngle.pitch }];
+          : [
+              {
+                frame: 0,
+                icam: currentScene.icam,
+                yaw: currentScene.cameraAngle.yaw,
+                pitch: currentScene.cameraAngle.pitch,
+              },
+            ];
       const idx = baseCuts.findIndex((c) => c.frame === currentFrame);
       const nextCut: CameraCutEvent = { frame: currentFrame, icam, yaw: 0, pitch: 0 };
       if (idx >= 0) baseCuts[idx] = nextCut;
@@ -240,6 +380,7 @@ export default function App() {
   };
 
   const handleChangeCameraAngle = (angle: CameraAngle) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     if (currentFrame === 0 && (!currentScene.cameraCuts || currentScene.cameraCuts.length === 0)) {
       updated[currentSceneIndex] = {
@@ -250,7 +391,14 @@ export default function App() {
       const baseCuts: CameraCutEvent[] =
         currentScene.cameraCuts && currentScene.cameraCuts.length > 0
           ? [...currentScene.cameraCuts]
-          : [{ frame: 0, icam: currentScene.icam, yaw: currentScene.cameraAngle.yaw, pitch: currentScene.cameraAngle.pitch }];
+          : [
+              {
+                frame: 0,
+                icam: currentScene.icam,
+                yaw: currentScene.cameraAngle.yaw,
+                pitch: currentScene.cameraAngle.pitch,
+              },
+            ];
       const idx = baseCuts.findIndex((c) => c.frame === currentFrame);
       const activeCam = resolveActiveCameraAtFrame(currentScene, currentFrame);
       const nextCut: CameraCutEvent = {
@@ -272,7 +420,7 @@ export default function App() {
   };
 
   const handleDeleteCameraCutAtFrame = (frame: number) => {
-    if (!currentScene.cameraCuts) return;
+    if (!currentScene || !currentScene.cameraCuts) return;
     const filtered = currentScene.cameraCuts.filter((c) => c.frame !== frame);
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
@@ -283,13 +431,13 @@ export default function App() {
     setStatusMessage(`Removed camera cut at Frame ${frame}.`);
   };
 
-  // Place new actor/prop using Camera-Aligned Stage Space (or world APOS for imported .3MM scenes)
+  // Place new actor/prop/3D text using Camera-Aligned Stage Space (or world APOS for imported .3MM scenes)
   const computePlacementForCurrentView = (slot: number): KeyframePosition => {
     const offsets = [0, 3.8, -3.8, 7.2, -7.2];
     const lateralStep = offsets[slot % offsets.length];
     const depthStep = -Math.floor(slot / offsets.length) * 3.2;
 
-    if (currentScene.coordMode !== 'world') {
+    if (!currentScene || currentScene.coordMode !== 'world') {
       return { x: lateralStep, y: 0, z: depthStep, rotY: 0 };
     }
 
@@ -306,13 +454,17 @@ export default function App() {
   };
 
   const handleAddActor = (item: CatalogActorItem) => {
-    const slot = currentScene.actors.length + currentScene.props.length;
+    if (!currentScene) return;
+    const slot =
+      currentScene.actors.length +
+      currentScene.props.length +
+      (currentScene.tdtTexts?.length || 0);
     const pos = computePlacementForCurrentView(slot);
     const newActor: ActorEntity = {
       id: 'actor_' + Math.random().toString(36).substring(2, 9),
       tmplCno: item.tmplCno,
       name: item.name,
-      anid: 0, // Strictly default At Rest
+      anid: 0,
       actionName: 'At Rest',
       keyframes: {
         [currentFrame]: pos,
@@ -330,38 +482,149 @@ export default function App() {
     setStatusMessage(`Placed "${item.name}" at Rest facing Camera #${activeCamAtFrame.icam + 1}.`);
   };
 
-  const handleAddProp = (item: CatalogPropItem) => {
-    const slot = currentScene.actors.length + currentScene.props.length;
+  const handleAddProp = async (item: CatalogPropItem) => {
+    if (!currentScene) return;
+    const slot =
+      currentScene.actors.length +
+      currentScene.props.length +
+      (currentScene.tdtTexts?.length || 0);
     const pos = computePlacementForCurrentView(slot);
+
+    let defaultAction = 'At Rest';
+    let defaultAnid: number | undefined;
+    try {
+      const tmpl = await loadTemplate(item.tmplCno);
+      if (tmpl.actions.length > 0) {
+        const restAct = tmpl.actions.find((a) => /rest|idle/i.test(a.name)) || tmpl.actions[0];
+        defaultAction = restAct.name;
+        defaultAnid = restAct.anid;
+      }
+    } catch {
+      // ignore fallback
+    }
+
     const newProp: PropEntity = {
       id: 'prop_' + Math.random().toString(36).substring(2, 9),
       tmplCno: item.tmplCno,
       name: item.name,
-      action: 'at rest',
+      action: defaultAction,
+      ...(defaultAnid !== undefined ? { anid: defaultAnid } : {}),
       keyframes: {
-        [currentFrame]: { ...pos, rotY: 0 },
+        [currentFrame]: { ...pos, rotY: currentScene.coordMode === 'world' ? pos.rotY : 0 },
+      },
+    };
+    setMovie((prev) => {
+      const sc = prev.scenes[currentSceneIndex];
+      if (!sc) return prev;
+      const updated = [...prev.scenes];
+      updated[currentSceneIndex] = {
+        ...sc,
+        props: [...sc.props, newProp],
+      };
+      return { ...prev, scenes: updated };
+    });
+    setSelectedEntityId(newProp.id);
+    setSelectedEntityType('prop');
+    setMobileTab('stage');
+    setStatusMessage(
+      `Placed prop "${item.name}" (${defaultAction}) in Camera #${activeCamAtFrame.icam + 1}.`
+    );
+  };
+
+  const handleAddTdtText = (spec: {
+    text: string;
+    tdfCno: number;
+    tdts: number;
+    mtrlCno?: number;
+    color?: string;
+  }) => {
+    if (!currentScene) return;
+    const slot =
+      currentScene.actors.length +
+      currentScene.props.length +
+      (currentScene.tdtTexts?.length || 0);
+    const pos = computePlacementForCurrentView(slot);
+    const newTdt: TdtTextEntity = {
+      id: 'tdt_' + Math.random().toString(36).substring(2, 9),
+      text: spec.text || 'HELLO',
+      tdfCno: spec.tdfCno,
+      tdts: spec.tdts,
+      mtrlCno: spec.mtrlCno,
+      keyframes: {
+        [currentFrame]: {
+          ...pos,
+          y: pos.y + 1.5,
+          ...(spec.color ? { color: spec.color } : {}),
+        },
       },
     };
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
       ...currentScene,
-      props: [...currentScene.props, newProp],
+      tdtTexts: [...(currentScene.tdtTexts || []), newTdt],
     };
     setMovie({ ...movie, scenes: updated });
-    setSelectedEntityId(newProp.id);
-    setSelectedEntityType('prop');
+    setSelectedEntityId(newTdt.id);
+    setSelectedEntityType('tdt');
     setMobileTab('stage');
-    setStatusMessage(`Placed prop "${item.name}" in Camera #${activeCamAtFrame.icam + 1}.`);
+    setStatusMessage(`Added 3D Word "${newTdt.text}" at Frame ${currentFrame}.`);
   };
 
-  // Supports per-frame action switching for Actors!
+  const handleUpdateTdtText = (
+    id: string,
+    patch: Partial<Pick<TdtTextEntity, 'text' | 'tdfCno' | 'tdts' | 'mtrlCno'>>
+  ) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    updated[currentSceneIndex] = {
+      ...currentScene,
+      tdtTexts: (currentScene.tdtTexts || []).map((t) =>
+        t.id === id ? { ...t, ...patch } : t
+      ),
+    };
+    setMovie({ ...movie, scenes: updated });
+  };
+
+  const handleAddTextBox = (spec: Omit<ScreenTextBox, 'id'>) => {
+    if (!currentScene) return;
+    const newBox: ScreenTextBox = {
+      ...spec,
+      id: 'tbox_' + Math.random().toString(36).substring(2, 9),
+    };
+    const updated = [...movie.scenes];
+    updated[currentSceneIndex] = {
+      ...currentScene,
+      textBoxes: [...(currentScene.textBoxes || []), newBox],
+      totalFrames: Math.max(currentScene.totalFrames, newBox.endFrame),
+    };
+    setMovie({ ...movie, scenes: updated });
+    setSelectedEntityId(newBox.id);
+    setSelectedEntityType('tbox');
+    setStatusMessage(
+      `Added 2D Onscreen Words "${newBox.text.slice(0, 24)}" (f${newBox.startFrame}..f${newBox.endFrame}).`
+    );
+  };
+
+  const handleUpdateTextBox = (id: string, patch: Partial<ScreenTextBox>) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    updated[currentSceneIndex] = {
+      ...currentScene,
+      textBoxes: (currentScene.textBoxes || []).map((tb) =>
+        tb.id === id ? { ...tb, ...patch } : tb
+      ),
+    };
+    setMovie({ ...movie, scenes: updated });
+  };
+
   const handleUpdateActorAction = (id: string, anid: number, actionName: string) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
       ...currentScene,
       actors: currentScene.actors.map((a) => {
         if (a.id !== id) return a;
-        const nextMap: Record<number, { anid: number; actionName: string }> = {
+        const nextMap = {
           ...(a.actionKeyframes || { 0: { anid: a.anid, actionName: a.actionName } }),
           [currentFrame]: { anid, actionName },
         };
@@ -378,30 +641,32 @@ export default function App() {
   };
 
   const handleUpdateActorCostume = (id: string, costumeCmids: number[]) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
       ...currentScene,
-      actors: currentScene.actors.map((a) =>
-        a.id === id ? { ...a, costumeCmids } : a
-      ),
+      actors: currentScene.actors.map((a) => (a.id === id ? { ...a, costumeCmids } : a)),
     };
     setMovie({ ...movie, scenes: updated });
   };
 
-  // Supports per-frame action switching for Props!
-  const handleUpdatePropAction = (id: string, action: PropAction) => {
+  const handleUpdatePropAction = (id: string, action: PropAction, anid?: number) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
       ...currentScene,
       props: currentScene.props.map((p) => {
         if (p.id !== id) return p;
-        const nextMap: Record<number, { action: PropAction }> = {
-          ...(p.actionKeyframes || { 0: { action: p.action } }),
-          [currentFrame]: { action },
+        const nextMap = {
+          ...(p.actionKeyframes || {
+            0: { action: p.action, ...(p.anid !== undefined ? { anid: p.anid } : {}) },
+          }),
+          [currentFrame]: { action, ...(anid !== undefined ? { anid } : {}) },
         };
         return {
           ...p,
           action: currentFrame === 0 ? action : p.action,
+          ...(currentFrame === 0 && anid !== undefined ? { anid } : {}),
           actionKeyframes: nextMap,
         };
       }),
@@ -410,12 +675,30 @@ export default function App() {
     setStatusMessage(`Set prop action "${action}" at Frame ${currentFrame}.`);
   };
 
+  const handleUpdatePropCostume = (id: string, costumeCmids: number[]) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    updated[currentSceneIndex] = {
+      ...currentScene,
+      props: currentScene.props.map((p) => (p.id === id ? { ...p, costumeCmids } : p)),
+    };
+    setMovie({ ...movie, scenes: updated });
+  };
+
   const handleToggleRecordingMovement = () => {
-    if (!selectedEntityId) return;
+    if (
+      !selectedEntityId ||
+      (selectedEntityType !== 'actor' &&
+        selectedEntityType !== 'prop' &&
+        selectedEntityType !== 'tdt')
+    ) {
+      return;
+    }
     const next = !isRecordingMovement;
     void sound3DMM.playUiWav('RECFRAME.WAV');
     if (next) {
       setIsPlaying(false);
+      setRenderFrame(currentFrame);
       setMobileTab('stage');
       setStatusMessage(`Recording motion at 6 FPS from Frame ${currentFrame} — drag entity!`);
     } else {
@@ -424,11 +707,47 @@ export default function App() {
     setIsRecordingMovement(next);
   };
 
+  const patchSceneEntityKeyframes = (
+    sc: Scene,
+    entityId: string,
+    type: StageEntityType,
+    updater: (kfs: Record<number, KeyframePosition>) => Record<number, KeyframePosition>,
+    newTotalFrames?: number
+  ): Scene => {
+    const nextTotal =
+      newTotalFrames !== undefined ? Math.max(sc.totalFrames, newTotalFrames) : sc.totalFrames;
+    if (type === 'actor') {
+      return {
+        ...sc,
+        totalFrames: nextTotal,
+        actors: sc.actors.map((a) =>
+          a.id === entityId ? { ...a, keyframes: updater(a.keyframes) } : a
+        ),
+      };
+    }
+    if (type === 'prop') {
+      return {
+        ...sc,
+        totalFrames: nextTotal,
+        props: sc.props.map((p) =>
+          p.id === entityId ? { ...p, keyframes: updater(p.keyframes) } : p
+        ),
+      };
+    }
+    return {
+      ...sc,
+      totalFrames: nextTotal,
+      tdtTexts: (sc.tdtTexts || []).map((t) =>
+        t.id === entityId ? { ...t, keyframes: updater(t.keyframes) } : t
+      ),
+    };
+  };
+
   const handleBeginRecordingAtFrame = (
     entityId: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     startFrame: number,
-    pos: { x: number; y: number; z: number; rotY: number }
+    pos: KeyframePosition
   ) => {
     setIsPlaying(false);
     setMovie((prev) => {
@@ -447,36 +766,23 @@ export default function App() {
           y: pos.y,
           z: pos.z,
           rotY: pos.rotY,
+          ...(pos.rotX !== undefined ? { rotX: pos.rotX } : {}),
+          ...(pos.rotZ !== undefined ? { rotZ: pos.rotZ } : {}),
           visible: cur.visible === false ? true : cur.visible,
         };
         return out;
       };
       const updatedScenes = [...prev.scenes];
-      updatedScenes[idx] =
-        type === 'actor'
-          ? {
-              ...sc,
-              totalFrames: Math.max(sc.totalFrames, startFrame),
-              actors: sc.actors.map((a) =>
-                a.id === entityId ? { ...a, keyframes: truncate(a.keyframes) } : a
-              ),
-            }
-          : {
-              ...sc,
-              totalFrames: Math.max(sc.totalFrames, startFrame),
-              props: sc.props.map((p) =>
-                p.id === entityId ? { ...p, keyframes: truncate(p.keyframes) } : p
-              ),
-            };
+      updatedScenes[idx] = patchSceneEntityKeyframes(sc, entityId, type, truncate, startFrame);
       return { ...prev, scenes: updatedScenes };
     });
   };
 
   const handleRecordMovementStep = (
     entityId: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     frame: number,
-    pos: { x: number; y: number; z: number; rotY: number },
+    pos: KeyframePosition,
     advancePlayhead: boolean
   ) => {
     setMovie((prev) => {
@@ -495,43 +801,36 @@ export default function App() {
           y: pos.y,
           z: pos.z,
           rotY: pos.rotY,
+          ...(pos.rotX !== undefined ? { rotX: pos.rotX } : {}),
+          ...(pos.rotZ !== undefined ? { rotZ: pos.rotZ } : {}),
           visible: cur.visible === false ? true : cur.visible,
         };
         return out;
       };
       const updatedScenes = [...prev.scenes];
-      updatedScenes[idx] =
-        type === 'actor'
-          ? {
-              ...sc,
-              totalFrames: Math.max(sc.totalFrames, frame),
-              actors: sc.actors.map((a) =>
-                a.id === entityId ? { ...a, keyframes: write(a.keyframes) } : a
-              ),
-            }
-          : {
-              ...sc,
-              totalFrames: Math.max(sc.totalFrames, frame),
-              props: sc.props.map((p) =>
-                p.id === entityId ? { ...p, keyframes: write(p.keyframes) } : p
-              ),
-            };
+      updatedScenes[idx] = patchSceneEntityKeyframes(sc, entityId, type, write, frame);
       return { ...prev, scenes: updatedScenes };
     });
 
     if (advancePlayhead) {
-      playheadRef.current = { sceneIndex: playheadRef.current.sceneIndex, frame };
+      playheadRef.current = {
+        sceneIndex: playheadRef.current.sceneIndex,
+        frame,
+        renderFrame: frame,
+      };
       setCurrentFrame(frame);
+      setRenderFrame(frame);
       triggerAudiosForFrame(movieRef.current.scenes[playheadRef.current.sceneIndex], frame);
     }
   };
 
   const handleMoveEntityAtFrame = (
     entityId: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     frame: number,
-    pos: { x: number; y: number; z: number; rotY: number },
+    pos: KeyframePosition,
     deltaX: number,
+    deltaY: number,
     deltaZ: number
   ) => {
     setMovie((prev) => {
@@ -548,6 +847,7 @@ export default function App() {
             out[fn] = {
               ...v,
               x: v.x + deltaX,
+              y: v.y + deltaY,
               z: v.z + deltaZ,
             };
           }
@@ -558,35 +858,133 @@ export default function App() {
           y: pos.y,
           z: pos.z,
           rotY: pos.rotY,
+          ...(pos.rotX !== undefined ? { rotX: pos.rotX } : {}),
+          ...(pos.rotZ !== undefined ? { rotZ: pos.rotZ } : {}),
         };
         return out;
       };
       const updatedScenes = [...prev.scenes];
-      updatedScenes[idx] =
-        type === 'actor'
-          ? {
-              ...sc,
-              actors: sc.actors.map((a) =>
-                a.id === entityId ? { ...a, keyframes: shift(a.keyframes) } : a
-              ),
-            }
-          : {
-              ...sc,
-              props: sc.props.map((p) =>
-                p.id === entityId ? { ...p, keyframes: shift(p.keyframes) } : p
-              ),
-            };
+      updatedScenes[idx] = patchSceneEntityKeyframes(sc, entityId, type, shift);
       return { ...prev, scenes: updatedScenes };
     });
   };
 
+  // Up / Down keyboard shortcut (ArrowUp / ArrowDown) for nudging selected 3D object vertically
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (
+        activeEl &&
+        (activeEl.tagName === 'INPUT' ||
+          activeEl.tagName === 'TEXTAREA' ||
+          activeEl.tagName === 'SELECT' ||
+          activeEl.isContentEditable)
+      ) {
+        return;
+      }
+      if (
+        !currentScene ||
+        !selectedEntityId ||
+        (selectedEntityType !== 'actor' &&
+          selectedEntityType !== 'prop' &&
+          selectedEntityType !== 'tdt')
+      ) {
+        return;
+      }
+
+      const entity =
+        selectedEntityType === 'actor'
+          ? currentScene.actors.find((a) => a.id === selectedEntityId)
+          : selectedEntityType === 'prop'
+          ? currentScene.props.find((p) => p.id === selectedEntityId)
+          : (currentScene.tdtTexts || []).find((t) => t.id === selectedEntityId);
+      if (!entity) return;
+
+      e.preventDefault();
+      const dy = e.key === 'ArrowUp' ? 0.7 : -0.7;
+      const cur = resolveInterpolatedKeyframe(entity.keyframes, currentFrame);
+      handleMoveEntityAtFrame(
+        selectedEntityId,
+        selectedEntityType,
+        currentFrame,
+        { ...cur, y: cur.y + dy },
+        0,
+        dy,
+        0
+      );
+      setStatusMessage(
+        `Moved ${e.key === 'ArrowUp' ? 'Up' : 'Down'} at Frame ${currentFrame} (Y: ${(cur.y + dy).toFixed(2)}).`
+      );
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [currentScene, selectedEntityId, selectedEntityType, currentFrame]);
+
+  const handleUpdateEntityColor = (
+    id: string,
+    type: StageEntityType,
+    color?: string
+  ) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    const patchColor = (kfs: Record<number, KeyframePosition>) => {
+      const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
+      const entry: KeyframePosition = { ...cur };
+      if (color) entry.color = color;
+      else delete entry.color;
+      return { ...kfs, [currentFrame]: entry };
+    };
+    updated[currentSceneIndex] = patchSceneEntityKeyframes(currentScene, id, type, patchColor);
+    setMovie({ ...movie, scenes: updated });
+    setStatusMessage(
+      color
+        ? `Set color ${color} at Frame ${currentFrame} (smoothly interpolates in 24 FPS playback!).`
+        : `Cleared keyframe color override at Frame ${currentFrame}.`
+    );
+  };
+
+  const handleUpdateEntityRotation = (
+    id: string,
+    type: StageEntityType,
+    rotX: number,
+    rotY: number,
+    rotZ: number
+  ) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    const patchRot = (kfs: Record<number, KeyframePosition>) => {
+      const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
+      const next: KeyframePosition = {
+        ...cur,
+        rotY,
+      };
+      if (Math.abs(rotX) > 1e-4) next.rotX = rotX;
+      else delete next.rotX;
+      if (Math.abs(rotZ) > 1e-4) next.rotZ = rotZ;
+      else delete next.rotZ;
+      return {
+        ...kfs,
+        [currentFrame]: next,
+      };
+    };
+    updated[currentSceneIndex] = patchSceneEntityKeyframes(currentScene, id, type, patchRot);
+    setMovie({ ...movie, scenes: updated });
+    const deg = (r: number) => Math.round((r * 180) / Math.PI);
+    setStatusMessage(
+      `Rotated at Frame ${currentFrame} (X:${deg(rotX)}° Y:${deg(rotY)}° Z:${deg(rotZ)}°).`
+    );
+  };
+
   const handleUpdateEntityScale = (
     id: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     scaleX: number,
     scaleY: number,
     scaleZ: number
   ) => {
+    if (!currentScene) return;
     const sx = Math.max(0.25, Math.min(3.5, scaleX));
     const sy = Math.max(0.25, Math.min(3.5, scaleY));
     const sz = Math.max(0.25, Math.min(3.5, scaleZ));
@@ -603,20 +1001,12 @@ export default function App() {
         },
       };
     };
-    updated[currentSceneIndex] =
-      type === 'actor'
-        ? {
-            ...currentScene,
-            actors: currentScene.actors.map((a) =>
-              a.id === id ? { ...a, keyframes: patchKeyframes(a.keyframes) } : a
-            ),
-          }
-        : {
-            ...currentScene,
-            props: currentScene.props.map((p) =>
-              p.id === id ? { ...p, keyframes: patchKeyframes(p.keyframes) } : p
-            ),
-          };
+    updated[currentSceneIndex] = patchSceneEntityKeyframes(
+      currentScene,
+      id,
+      type,
+      patchKeyframes
+    );
     setMovie({ ...movie, scenes: updated });
     setStatusMessage(
       `Scaled at Frame ${currentFrame} (${sx.toFixed(2)}×${sy.toFixed(2)}×${sz.toFixed(2)}).`
@@ -625,9 +1015,10 @@ export default function App() {
 
   const handleToggleEntityVisibility = (
     id: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     visible: boolean
   ) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     const patchKeyframes = (kfs: Record<number, KeyframePosition>) => {
       const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
@@ -639,30 +1030,23 @@ export default function App() {
         },
       };
     };
-    updated[currentSceneIndex] =
-      type === 'actor'
-        ? {
-            ...currentScene,
-            actors: currentScene.actors.map((a) =>
-              a.id === id ? { ...a, keyframes: patchKeyframes(a.keyframes) } : a
-            ),
-          }
-        : {
-            ...currentScene,
-            props: currentScene.props.map((p) =>
-              p.id === id ? { ...p, keyframes: patchKeyframes(p.keyframes) } : p
-            ),
-          };
+    updated[currentSceneIndex] = patchSceneEntityKeyframes(
+      currentScene,
+      id,
+      type,
+      patchKeyframes
+    );
     setMovie({ ...movie, scenes: updated });
     setStatusMessage(`${visible ? 'Showed' : 'Hid'} ${type} at Frame ${currentFrame}.`);
   };
 
   const handleSetEntityFrame = (
     id: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     targetFrame: number,
     mode: 'pin' | 'showFrom'
   ) => {
+    if (!currentScene) return;
     const tf = Math.max(0, Math.round(targetFrame));
     const updated = [...movie.scenes];
     const patchKeyframes = (kfs: Record<number, KeyframePosition>) => {
@@ -681,24 +1065,18 @@ export default function App() {
       return next;
     };
 
-    updated[currentSceneIndex] =
-      type === 'actor'
-        ? {
-            ...currentScene,
-            totalFrames: Math.max(currentScene.totalFrames, tf),
-            actors: currentScene.actors.map((a) =>
-              a.id === id ? { ...a, keyframes: patchKeyframes(a.keyframes) } : a
-            ),
-          }
-        : {
-            ...currentScene,
-            totalFrames: Math.max(currentScene.totalFrames, tf),
-            props: currentScene.props.map((p) =>
-              p.id === id ? { ...p, keyframes: patchKeyframes(p.keyframes) } : p
-            ),
-          };
+    updated[currentSceneIndex] = patchSceneEntityKeyframes(
+      currentScene,
+      id,
+      type,
+      patchKeyframes,
+      tf
+    );
     setMovie({ ...movie, scenes: updated });
     setCurrentFrame(tf);
+    setRenderFrame(tf);
+    playheadRef.current.frame = tf;
+    playheadRef.current.renderFrame = tf;
     setStatusMessage(
       mode === 'showFrom'
         ? `Set ${type} to enter scene at Frame ${tf}.`
@@ -712,6 +1090,7 @@ export default function App() {
     celOffset: number,
     freeze: boolean
   ) => {
+    if (!currentScene) return;
     const cleanCel = Math.max(0, Math.round(celOffset));
     const updated = [...movie.scenes];
     if (type === 'actor') {
@@ -722,7 +1101,8 @@ export default function App() {
           const prevMap = a.actionKeyframes || { 0: { anid: a.anid, actionName: a.actionName } };
           const curKeys = Object.keys(prevMap).map(Number).sort((x, y) => x - y);
           const prevKey = curKeys.filter((k) => k <= currentFrame).pop();
-          const curAct = prevKey !== undefined ? prevMap[prevKey] : { anid: a.anid, actionName: a.actionName };
+          const curAct =
+            prevKey !== undefined ? prevMap[prevKey] : { anid: a.anid, actionName: a.actionName };
           return {
             ...a,
             actionKeyframes: {
@@ -766,40 +1146,46 @@ export default function App() {
     );
   };
 
-  const handleClearKeyframes = (id: string, type: 'actor' | 'prop') => {
-    const resolveCur = (kfs: Record<number, KeyframePosition>) => {
-      return resolveInterpolatedKeyframe(kfs, currentFrame);
-    };
+  const handleClearKeyframes = (id: string, type: StageEntityType) => {
+    if (!currentScene) return;
+    const resolveCur = (kfs: Record<number, KeyframePosition>) =>
+      resolveInterpolatedKeyframe(kfs, currentFrame);
     const updated = [...movie.scenes];
-    if (type === 'actor') {
-      updated[currentSceneIndex] = {
-        ...currentScene,
-        actors: currentScene.actors.map((a) =>
-          a.id === id ? { ...a, keyframes: { 0: resolveCur(a.keyframes) } } : a
-        ),
-      };
-    } else {
-      updated[currentSceneIndex] = {
-        ...currentScene,
-        props: currentScene.props.map((p) =>
-          p.id === id ? { ...p, keyframes: { 0: resolveCur(p.keyframes) } } : p
-        ),
-      };
-    }
+    updated[currentSceneIndex] = patchSceneEntityKeyframes(
+      currentScene,
+      id,
+      type,
+      (kfs) => ({ 0: resolveCur(kfs) })
+    );
     setMovie({ ...movie, scenes: updated });
+    setStatusMessage(`Cleared keyframes for ${type} (kept pose at Frame 0).`);
   };
 
-  const handleDeleteEntity = (id: string, type: 'actor' | 'prop') => {
+  const handleDeleteEntity = (
+    id: string,
+    type: 'actor' | 'prop' | 'tdt' | 'tbox'
+  ) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     if (type === 'actor') {
       updated[currentSceneIndex] = {
         ...currentScene,
         actors: currentScene.actors.filter((a) => a.id !== id),
       };
-    } else {
+    } else if (type === 'prop') {
       updated[currentSceneIndex] = {
         ...currentScene,
         props: currentScene.props.filter((p) => p.id !== id),
+      };
+    } else if (type === 'tdt') {
+      updated[currentSceneIndex] = {
+        ...currentScene,
+        tdtTexts: (currentScene.tdtTexts || []).filter((t) => t.id !== id),
+      };
+    } else {
+      updated[currentSceneIndex] = {
+        ...currentScene,
+        textBoxes: (currentScene.textBoxes || []).filter((tb) => tb.id !== id),
       };
     }
     setMovie({ ...movie, scenes: updated });
@@ -811,16 +1197,21 @@ export default function App() {
   };
 
   const handleAddAudioCue = (cue: ImportedAudioCue) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
       ...currentScene,
-      audios: [...currentScene.audios.filter((a) => a.frame !== cue.frame || a.isMidi !== cue.isMidi), cue],
+      audios: [
+        ...currentScene.audios.filter((a) => a.frame !== cue.frame || a.isMidi !== cue.isMidi),
+        cue,
+      ],
     };
     setMovie({ ...movie, scenes: updated });
     setStatusMessage(`Added "${cue.filename}" at Frame ${cue.frame}.`);
   };
 
   const handleDeleteAudioCue = (id: string) => {
+    if (!currentScene) return;
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
       ...currentScene,
@@ -829,19 +1220,46 @@ export default function App() {
     setMovie({ ...movie, scenes: updated });
   };
 
-  const handleSaveMovieJSON = () => {
-    void sound3DMM.playUiWav('FSAVE.WAV');
-    const jsonString = JSON.stringify(movie, null, 2);
-    const blob = new Blob([jsonString], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${movie.title.toLowerCase().replace(/\s+/g, '_')}.3mm.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setStatusMessage('Saved complete movie + embedded audio/MIDI cues to single .3mm.json.');
+  // Save authentic binary .3MM file ONLY (never .json)
+  const handleSaveMovie3MM = async () => {
+    if (!hasScene) {
+      void sound3DMM.playUiWav('ALERT2.WAV');
+      setStatusMessage('Add at least one scene before saving a .3MM movie.');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      setStatusMessage('Packing binary .3MM movie archive...');
+      const bytes = await exportMovieTo3mmBytes(movie);
+      void sound3DMM.playUiWav('FSAVE.WAV');
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      const blob = new Blob([copy.buffer], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const safeName =
+        movie.title
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '_')
+          .replace(/^_+|_+$/g, '') || 'movie';
+      link.href = url;
+      link.download = `${safeName}.3mm`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatusMessage(
+        `Saved binary "${safeName}.3mm" (${(bytes.byteLength / 1024).toFixed(1)} KB).`
+      );
+    } catch (err) {
+      console.error('Failed saving .3MM:', err);
+      void sound3DMM.playUiWav('ALERT2.WAV');
+      setStatusMessage('Error exporting binary .3MM file.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
+  // Import binary .3MM movies ONLY (never .json)
   const handleLoadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -849,37 +1267,33 @@ export default function App() {
     sound3DMM.stopAll();
     setIsPlaying(false);
 
+    if (!file.name.toLowerCase().endsWith('.3mm')) {
+      void sound3DMM.playUiWav('ALERT2.WAV');
+      setStatusMessage('Only authentic binary .3MM movie files are supported.');
+      return;
+    }
+
     try {
-      if (file.name.toLowerCase().endsWith('.3mm')) {
-        setStatusMessage(`Decoding real binary ${file.name}...`);
-        const ab = await file.arrayBuffer();
-        const loaded = await loadOfficial3mmMovie(ab, file.name);
-        void sound3DMM.playUiWav('FNEW.WAV');
-        setMovie(loaded);
-        setCurrentSceneIndex(0);
-        setCurrentFrame(0);
-        setSelectedEntityId(loaded.scenes[0]?.actors[0]?.id || null);
-        setSelectedEntityType(loaded.scenes[0]?.actors[0] ? 'actor' : null);
-        setIsRecordingMovement(false);
-        setStatusMessage(`Loaded official binary movie "${loaded.title}"!`);
-      } else {
-        const text = await file.text();
-        const loaded = JSON.parse(text) as Movie;
-        if (loaded && loaded.scenes && loaded.scenes.length > 0) {
-          void sound3DMM.playUiWav('FNEW.WAV');
-          setMovie(loaded);
-          setCurrentSceneIndex(0);
-          setCurrentFrame(0);
-          setSelectedEntityId(loaded.scenes[0]?.actors[0]?.id || null);
-          setSelectedEntityType(loaded.scenes[0]?.actors[0] ? 'actor' : null);
-          setIsRecordingMovement(false);
-          setStatusMessage(`Loaded movie "${loaded.title}".`);
-        }
-      }
+      setStatusMessage(`Decoding binary ${file.name}...`);
+      const ab = await file.arrayBuffer();
+      const loaded = await loadOfficial3mmMovie(ab, file.name);
+      void sound3DMM.playUiWav('FNEW.WAV');
+      setMovie(loaded);
+      setCurrentSceneIndex(0);
+      setCurrentFrame(0);
+      setRenderFrame(0);
+      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      const firstActor = loaded.scenes[0]?.actors[0];
+      setSelectedEntityId(firstActor?.id || null);
+      setSelectedEntityType(firstActor ? 'actor' : null);
+      setIsRecordingMovement(false);
+      setStatusMessage(
+        `Loaded binary .3MM movie "${loaded.title}" (${loaded.scenes.length} scene${loaded.scenes.length === 1 ? '' : 's'})!`
+      );
     } catch (err) {
       console.error(err);
       void sound3DMM.playUiWav('ALERT2.WAV');
-      setStatusMessage('Error loading movie file.');
+      setStatusMessage('Error decoding .3MM binary movie file.');
     }
   };
 
@@ -889,13 +1303,16 @@ export default function App() {
     setIsPlaying(false);
     setStatusMessage(`Loading authentic ${sampleFile}...`);
     try {
-      const loaded = await loadOfficial3mmMovie(`/3dmm/samples/${sampleFile}`, label);
+      const loaded = await loadOfficial3mmMovie(assetUrl(`3dmm/samples/${sampleFile}`), label);
       void sound3DMM.playUiWav('FNEW.WAV');
       setMovie(loaded);
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
-      setSelectedEntityId(loaded.scenes[0]?.actors[0]?.id || null);
-      setSelectedEntityType(loaded.scenes[0]?.actors[0] ? 'actor' : null);
+      setRenderFrame(0);
+      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      const firstActor = loaded.scenes[0]?.actors[0];
+      setSelectedEntityId(firstActor?.id || null);
+      setSelectedEntityType(firstActor ? 'actor' : null);
       setIsRecordingMovement(false);
       setStatusMessage(
         `Loaded "${sampleFile}" (${loaded.scenes.length} scene${loaded.scenes.length > 1 ? 's' : ''}, ${loaded.scenes[0]?.audios.length || 0} audio/MIDI cues)!`
@@ -907,21 +1324,28 @@ export default function App() {
     }
   };
 
+  const totalSceneObjects = currentScene
+    ? currentScene.actors.length +
+      currentScene.props.length +
+      (currentScene.tdtTexts?.length || 0) +
+      (currentScene.textBoxes?.length || 0)
+    : 0;
+
   return (
     <div className="w-screen h-screen bg-[#16092e] flex flex-col overflow-hidden select-none">
       <input
         ref={fileInputRef}
         type="file"
-        accept=".json,.3mm"
+        accept=".3mm"
         onChange={handleLoadFile}
         className="hidden"
       />
 
-      {/* Original 3DMM Studio Header Strip (Browser-Native, No Win95 Window Chrome) */}
+      {/* Original 3DMM Studio Header Strip */}
       <header className="bg-gradient-to-r from-[#3e1d7a] via-[#5428a3] to-[#3e1d7a] border-b-2 border-[#120624] px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-white shrink-0">
         <div className="flex items-center gap-2.5">
           <img
-            src="/3dmm/bmp/4NEW.BMP"
+            src={assetUrl('3dmm/bmp/4NEW.BMP')}
             alt="3D Movie Maker"
             className="h-6 w-auto object-contain image-rendering-pixelated"
           />
@@ -939,6 +1363,15 @@ export default function App() {
 
         <div className="flex flex-wrap items-center gap-1.5">
           <button
+            onClick={handleNewBlankMovie}
+            title="Start a completely blank movie (black screen until you add a scene)"
+            className="studio-btn px-2.5 py-1 font-bold flex items-center gap-1.5 text-rose-200"
+          >
+            <FilePlus size={13} />
+            <span>New</span>
+          </button>
+
+          <button
             onClick={() => {
               void sound3DMM.playUiWav('MAPOPEN.WAV');
               setShowSamplesModal(true);
@@ -954,20 +1387,21 @@ export default function App() {
             className="studio-btn px-2.5 py-1 font-bold flex items-center gap-1.5 text-cyan-200"
           >
             <FolderOpen size={13} />
-            <span>Open .3mm / .json</span>
+            <span>Open .3mm</span>
           </button>
 
           <button
-            onClick={handleSaveMovieJSON}
-            className="bg-emerald-700 hover:bg-emerald-600 border-t-2 border-l-2 border-emerald-400 border-r-2 border-b-2 border-r-emerald-950 border-b-emerald-950 px-2.5 py-1 font-bold flex items-center gap-1.5 text-white shadow"
+            onClick={() => void handleSaveMovie3MM()}
+            disabled={isSaving || !hasScene}
+            className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-45 disabled:cursor-not-allowed border-t-2 border-l-2 border-emerald-400 border-r-2 border-b-2 border-r-emerald-950 border-b-emerald-950 px-2.5 py-1 font-bold flex items-center gap-1.5 text-white shadow"
           >
             <Save size={13} />
-            <span>Save .3mm.json</span>
+            <span>{isSaving ? 'Saving...' : 'Save .3mm'}</span>
           </button>
         </div>
       </header>
 
-      {/* Real Scenes Strip */}
+      {/* Real Scenes Strip — Always enabled so user can add Scene 1 in a blank movie */}
       <SceneBar
         scenes={movie.scenes}
         catalogScenes={catalog.scenes}
@@ -977,6 +1411,8 @@ export default function App() {
           setIsPlaying(false);
           setCurrentSceneIndex(idx);
           setCurrentFrame(0);
+          setRenderFrame(0);
+          playheadRef.current = { sceneIndex: idx, frame: 0, renderFrame: 0 };
           setSelectedEntityId(null);
           setSelectedEntityType(null);
           setIsRecordingMovement(false);
@@ -985,124 +1421,179 @@ export default function App() {
         onUpdateCurrentScene={handleUpdateCurrentScene}
       />
 
-      {/* Real Camera Views Strip (Supports mid-scene cuts!) */}
-      <CameraAngleBar
-        currentFrame={currentFrame}
-        currentViewIndex={activeCamAtFrame.icam}
-        cameraCuts={currentScene.cameraCuts}
-        catalogViews={activeCatalogScene?.views || []}
-        cameraAngle={{ yaw: activeCamAtFrame.yaw, pitch: activeCamAtFrame.pitch }}
-        onSelectCameraView={handleSelectCameraView}
-        onChangeCameraAngle={handleChangeCameraAngle}
-        onDeleteCameraCutAtFrame={handleDeleteCameraCutAtFrame}
-      />
-
-      {/* Mobile Stage / Cast Switcher */}
-      <div className="flex md:hidden border-b border-[#120624] bg-[#231047] p-1 gap-1 text-xs shrink-0">
-        <button
-          onClick={() => setMobileTab('stage')}
-          className={`flex-1 py-1 font-bold ${
-            mobileTab === 'stage' ? 'bg-[#6b36c4] border border-amber-300 text-white' : 'studio-btn text-purple-100'
-          }`}
-        >
-          🎬 3D Stage
-        </button>
-        <button
-          onClick={() => setMobileTab('cast')}
-          className={`flex-1 py-1 font-bold ${
-            mobileTab === 'cast' ? 'bg-[#6b36c4] border border-amber-300 text-white' : 'studio-btn text-purple-100'
-          }`}
-        >
-          🎭 Cast & Props ({currentScene.actors.length + currentScene.props.length})
-        </button>
-      </div>
-
-      {/* Main Studio Workspace */}
-      <div className="flex-1 flex overflow-hidden relative">
-        <div className={`flex-1 relative ${mobileTab === 'stage' ? 'flex' : 'hidden md:flex'}`}>
-          <Viewport3D
-            sceneData={currentScene}
-            sceneIndex={currentSceneIndex}
-            totalScenes={movie.scenes.length}
+      {!hasScene ? (
+        /* Blank Movie: pure black screen with no object-adding or sound-adding buttons */
+        <div className="flex-1 bg-black" />
+      ) : (
+        <>
+          {/* Real Camera Views Strip (Supports mid-scene cuts!) */}
+          <CameraAngleBar
             currentFrame={currentFrame}
-            selectedEntityId={selectedEntityId}
-            onSelectEntity={(id, type) => {
-              setSelectedEntityId(id);
-              setSelectedEntityType(type);
-            }}
-            onStageViewReady={(bgView) => {
-              stageViewRef.current = bgView;
-            }}
-            isRecordingMovement={isRecordingMovement}
-            onBeginRecordingAtFrame={handleBeginRecordingAtFrame}
-            onRecordMovementStep={handleRecordMovementStep}
-            onMoveEntityAtFrame={handleMoveEntityAtFrame}
+            currentViewIndex={activeCamAtFrame.icam}
+            cameraCuts={currentScene!.cameraCuts}
+            catalogViews={activeCatalogScene?.views || []}
+            cameraAngle={{ yaw: activeCamAtFrame.yaw, pitch: activeCamAtFrame.pitch }}
+            onSelectCameraView={handleSelectCameraView}
+            onChangeCameraAngle={handleChangeCameraAngle}
+            onDeleteCameraCutAtFrame={handleDeleteCameraCutAtFrame}
           />
-        </div>
 
-        <div className={`${mobileTab === 'cast' ? 'flex flex-1 w-full' : 'hidden md:flex'}`}>
-          <ActorPropPanel
+          {/* Mobile Stage / Cast Switcher */}
+          <div className="flex md:hidden border-b border-[#120624] bg-[#231047] p-1 gap-1 text-xs shrink-0">
+            <button
+              onClick={() => setMobileTab('stage')}
+              className={`flex-1 py-1 font-bold ${
+                mobileTab === 'stage'
+                  ? 'bg-[#6b36c4] border border-amber-300 text-white'
+                  : 'studio-btn text-purple-100'
+              }`}
+            >
+              🎬 3D Stage
+            </button>
+            <button
+              onClick={() => setMobileTab('cast')}
+              className={`flex-1 py-1 font-bold ${
+                mobileTab === 'cast'
+                  ? 'bg-[#6b36c4] border border-amber-300 text-white'
+                  : 'studio-btn text-purple-100'
+              }`}
+            >
+              🎭 Cast & Props ({totalSceneObjects})
+            </button>
+          </div>
+
+          {/* Main Studio Workspace */}
+          <div className="flex-1 flex overflow-hidden relative">
+            <div className={`flex-1 relative ${mobileTab === 'stage' ? 'flex' : 'hidden md:flex'}`}>
+              <Viewport3D
+                sceneData={currentScene!}
+                sceneIndex={currentSceneIndex}
+                totalScenes={movie.scenes.length}
+                currentFrame={currentFrame}
+                renderFrame={renderFrame}
+                isPlaying={isPlaying}
+                livePlayheadRef={playheadRef}
+                selectedEntityId={selectedEntityId}
+                onSelectEntity={(id, type) => {
+                  setSelectedEntityId(id);
+                  setSelectedEntityType(type);
+                }}
+                onStageViewReady={(bgView) => {
+                  stageViewRef.current = bgView;
+                }}
+                moveUpDownMode={moveUpDownMode}
+                onToggleMoveUpDown={() => {
+                  setMoveUpDownMode((prev) => {
+                    const next = !prev;
+                    if (next) setRotateMode(false);
+                    setStatusMessage(
+                      next
+                        ? 'Up & Down drag ON: drags move vertically (Up/Down) & sideways (Left/Right) — press ArrowUp/ArrowDown anytime.'
+                        : 'Up & Down drag OFF: standard ground-plane movement.'
+                    );
+                    return next;
+                  });
+                }}
+                rotateMode={rotateMode}
+                onToggleRotateMode={() => {
+                  setRotateMode((prev) => {
+                    const next = !prev;
+                    if (next) setMoveUpDownMode(false);
+                    setStatusMessage(
+                      next
+                        ? '3D Rotate drag ON: drag Left/Right to turn Y, Up/Down to tilt X, Shift+drag to roll Z.'
+                        : '3D Rotate drag OFF.'
+                    );
+                    return next;
+                  });
+                }}
+                isRecordingMovement={isRecordingMovement}
+                onBeginRecordingAtFrame={handleBeginRecordingAtFrame}
+                onRecordMovementStep={handleRecordMovementStep}
+                onMoveEntityAtFrame={handleMoveEntityAtFrame}
+              />
+            </div>
+
+            <div className={`${mobileTab === 'cast' ? 'flex flex-1 w-full' : 'hidden md:flex'}`}>
+              <ActorPropPanel
+                currentFrame={currentFrame}
+                totalFrames={currentScene!.totalFrames}
+                onSeekFrame={handleSeekFrame}
+                catalogActors={catalog.actors}
+                catalogProps={catalog.props}
+                actors={currentScene!.actors}
+                props={currentScene!.props}
+                tdtTexts={currentScene!.tdtTexts || []}
+                textBoxes={currentScene!.textBoxes || []}
+                selectedEntityId={selectedEntityId}
+                selectedEntityType={selectedEntityType}
+                onSelectEntity={(id, type) => {
+                  setSelectedEntityId(id);
+                  setSelectedEntityType(type);
+                  if (window.innerWidth < 768 && type !== 'tbox') setMobileTab('stage');
+                }}
+                onAddActor={handleAddActor}
+                onAddProp={(item) => void handleAddProp(item)}
+                onUpdateActorAction={handleUpdateActorAction}
+                onUpdateActorCostume={handleUpdateActorCostume}
+                onUpdatePropAction={handleUpdatePropAction}
+                onUpdatePropCostume={handleUpdatePropCostume}
+                onUpdateEntityColor={handleUpdateEntityColor}
+                onUpdateEntityRotation={handleUpdateEntityRotation}
+                onUpdateEntityScale={handleUpdateEntityScale}
+                onSetEntityFrame={handleSetEntityFrame}
+                onToggleEntityVisibility={handleToggleEntityVisibility}
+                onUpdateEntityPoseCel={handleUpdateEntityPoseCel}
+                onAddTdtText={handleAddTdtText}
+                onUpdateTdtText={handleUpdateTdtText}
+                onAddTextBox={handleAddTextBox}
+                onUpdateTextBox={handleUpdateTextBox}
+                isRecordingMovement={isRecordingMovement}
+                onToggleRecordingMovement={handleToggleRecordingMovement}
+                onClearKeyframes={handleClearKeyframes}
+                onDeleteEntity={handleDeleteEntity}
+              />
+            </div>
+          </div>
+
+          {/* Timeline & Sound/MIDI Cues */}
+          <TimelineBar
             currentFrame={currentFrame}
-            totalFrames={currentScene.totalFrames}
+            totalFrames={currentScene!.totalFrames}
+            isPlaying={isPlaying}
+            onTogglePlay={handleTogglePlay}
             onSeekFrame={handleSeekFrame}
-            catalogActors={catalog.actors}
-            catalogProps={catalog.props}
-            actors={currentScene.actors}
-            props={currentScene.props}
-            selectedEntityId={selectedEntityId}
-            selectedEntityType={selectedEntityType}
-            onSelectEntity={(id, type) => {
-              setSelectedEntityId(id);
-              setSelectedEntityType(type);
-              if (window.innerWidth < 768) setMobileTab('stage');
+            onRewind={() => {
+              sound3DMM.stopAll();
+              setIsPlaying(false);
+              if (currentFrame === 0 && currentSceneIndex > 0) {
+                setCurrentSceneIndex(0);
+                setRenderFrame(0);
+                playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+                setSelectedEntityId(null);
+                setSelectedEntityType(null);
+              } else {
+                setCurrentFrame(0);
+                setRenderFrame(0);
+                playheadRef.current.frame = 0;
+                playheadRef.current.renderFrame = 0;
+              }
             }}
-            onAddActor={handleAddActor}
-            onAddProp={handleAddProp}
-            onUpdateActorAction={handleUpdateActorAction}
-            onUpdateActorCostume={handleUpdateActorCostume}
-            onUpdatePropAction={handleUpdatePropAction}
-            onUpdateEntityScale={handleUpdateEntityScale}
-            onSetEntityFrame={handleSetEntityFrame}
-            onToggleEntityVisibility={handleToggleEntityVisibility}
-            onUpdateEntityPoseCel={handleUpdateEntityPoseCel}
-            isRecordingMovement={isRecordingMovement}
-            onToggleRecordingMovement={handleToggleRecordingMovement}
-            onClearKeyframes={handleClearKeyframes}
-            onDeleteEntity={handleDeleteEntity}
+            onOpenAudioModal={() => setIsAudioModalOpen(true)}
+            audioCues={currentScene!.audios}
+            cameraCuts={currentScene!.cameraCuts}
+            onDeleteAudioCue={handleDeleteAudioCue}
           />
-        </div>
-      </div>
-
-      {/* Timeline & Sound/MIDI Cues */}
-      <TimelineBar
-        currentFrame={currentFrame}
-        totalFrames={currentScene.totalFrames}
-        isPlaying={isPlaying}
-        onTogglePlay={handleTogglePlay}
-        onSeekFrame={handleSeekFrame}
-        onRewind={() => {
-          sound3DMM.stopMusic();
-          setIsPlaying(false);
-          if (currentFrame === 0 && currentSceneIndex > 0) {
-            setCurrentSceneIndex(0);
-            setSelectedEntityId(null);
-            setSelectedEntityType(null);
-          } else {
-            setCurrentFrame(0);
-          }
-        }}
-        onOpenAudioModal={() => setIsAudioModalOpen(true)}
-        audioCues={currentScene.audios}
-        cameraCuts={currentScene.cameraCuts}
-        onDeleteAudioCue={handleDeleteAudioCue}
-      />
+        </>
+      )}
 
       {/* Footer Info Strip */}
       <div className="bg-[#180a33] border-t-2 border-[#120624] px-3 py-1 text-[11px] text-purple-200 flex items-center justify-between shrink-0">
         <span className="truncate mr-2">{statusMessage}</span>
         <span className="font-mono text-amber-300 shrink-0">
-          Actors: {currentScene.actors.length} | Props: {currentScene.props.length} | Sounds:{' '}
-          {currentScene.audios.length}
+          {currentScene
+            ? `Actors: ${currentScene.actors.length} | Props: ${currentScene.props.length} | 3D Words: ${currentScene.tdtTexts?.length || 0} | 2D Text: ${currentScene.textBoxes?.length || 0} | Sounds: ${currentScene.audios.length}`
+            : 'Blank Movie (0 Scenes)'}
         </span>
       </div>
 
@@ -1138,12 +1629,14 @@ export default function App() {
         </div>
       )}
 
-      <AudioImportModal
-        currentFrame={currentFrame}
-        isOpen={isAudioModalOpen}
-        onClose={() => setIsAudioModalOpen(false)}
-        onAddAudioCue={handleAddAudioCue}
-      />
+      {hasScene && (
+        <AudioImportModal
+          currentFrame={currentFrame}
+          isOpen={isAudioModalOpen}
+          onClose={() => setIsAudioModalOpen(false)}
+          onAddAudioCue={handleAddAudioCue}
+        />
+      )}
     </div>
   );
 }

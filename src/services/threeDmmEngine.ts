@@ -10,11 +10,13 @@ import {
   applyGlcrPalette,
   decodeTmapToTexture,
   decodeZbmpToDepthTexture,
+  extractSkinHexFromTmap,
   loadBasePalette,
   mbmpToDataUrl,
   Palette256,
 } from './mbmpDecoder';
 import { PropAction } from '../types/movie';
+import { assetUrl } from '../utils/assetUrl';
 
 export interface CatalogActorItem {
   tmplCno: number;
@@ -69,6 +71,9 @@ export interface ParsedCmtl {
   cmid: number;
   ibset: number;
   materials: THREE.Material[];
+  colors: string[];
+  tmapCnos: (number | null)[];
+  skinHexes: (string | null)[];
   overrideGeometries: (THREE.BufferGeometry | null)[];
 }
 
@@ -97,6 +102,8 @@ export interface TemplateRig {
   bodyRoot: THREE.Group;
   parts: THREE.Group[];
   meshes: THREE.Mesh[];
+  baseMaterialColors: THREE.Color[];
+  overrideGeometries: (THREE.BufferGeometry | null)[];
   template: ParsedTemplate;
   costumeCmids: number[];
   baseScale: number;
@@ -145,11 +152,11 @@ export function loadThreeDmmCatalog(): Promise<ThreeDmmCatalog> {
   catalogPromise = (async () => {
     const [palette, actorTh, propTh, bkgdsTh, tmplsCn, bkgdsCn] = await Promise.all([
       loadBasePalette(),
-      getArchive('/3dmm/3dmovie/ACTOR.3TH', true),
-      getArchive('/3dmm/3dmovie/PROP.3TH', true),
-      getArchive('/3dmm/3dmovie/BKGDS.3TH', true),
-      getArchive('/3dmm/3dmovie/TMPLS.3CN', false),
-      getArchive('/3dmm/3dmovie/BKGDS.3CN', false),
+      getArchive(assetUrl('3dmm/3dmovie/ACTOR.3TH'), true),
+      getArchive(assetUrl('3dmm/3dmovie/PROP.3TH'), true),
+      getArchive(assetUrl('3dmm/3dmovie/BKGDS.3TH'), true),
+      getArchive(assetUrl('3dmm/3dmovie/TMPLS.3CN'), false),
+      getArchive(assetUrl('3dmm/3dmovie/BKGDS.3CN'), false),
     ]);
 
     // Extract 45 Actors
@@ -288,6 +295,35 @@ export function parseBmdlGeometry(bmdlBytes: Uint8Array): THREE.BufferGeometry {
     indices[f * 3 + 2] = dv.getUint16(fOff + 4, true);
   }
 
+  // Compute signed volume and centroid-outward score to detect inward-wound shells
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < cver; i++) {
+    cx += positions[i * 3 + 0];
+    cy += positions[i * 3 + 1];
+    cz += positions[i * 3 + 2];
+  }
+  cx /= cver; cy /= cver; cz /= cver;
+
+  let signedVol = 0;
+  let outScore = 0;
+  for (let f = 0; f < cfac; f++) {
+    const i0 = indices[f * 3 + 0], i1 = indices[f * 3 + 1], i2 = indices[f * 3 + 2];
+    if (i0 >= cver || i1 >= cver || i2 >= cver) continue;
+    const ax = positions[i0 * 3], ay = positions[i0 * 3 + 1], az = positions[i0 * 3 + 2];
+    const bx = positions[i1 * 3], by = positions[i1 * 3 + 1], bz = positions[i1 * 3 + 2];
+    const cxv = positions[i2 * 3], cyv = positions[i2 * 3 + 1], czv = positions[i2 * 3 + 2];
+    signedVol += (ax * (by * czv - bz * cyv) + ay * (bz * cxv - bx * czv) + az * (bx * cyv - by * cxv)) / 6;
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cxv - ax, acy = cyv - ay, acz = czv - az;
+    const nx = aby * acz - abz * acy;
+    const ny = abz * acx - abx * acz;
+    const nz = abx * acy - aby * acx;
+    const fmx = (ax + bx + cxv) / 3 - cx;
+    const fmy = (ay + by + cyv) / 3 - cy;
+    const fmz = (az + bz + czv) / 3 - cz;
+    outScore += fmx * nx + fmy * ny + fmz * nz;
+  }
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
@@ -296,6 +332,8 @@ export function parseBmdlGeometry(bmdlBytes: Uint8Array): THREE.BufferGeometry {
   computeWeldedSmoothNormals(geo);
   geo.computeBoundingSphere();
   geo.computeBoundingBox();
+  geo.userData.signedVol = signedVol;
+  geo.userData.outScore = outScore;
   return geo;
 }
 
@@ -342,23 +380,64 @@ async function parseMtrlToThree(
   archive: ChunkyFile,
   mtrlMeta: ChunkMeta,
   palette: Palette256
-): Promise<THREE.Material> {
+): Promise<{ material: THREE.Material; tmapCno: number | null; skinHex: string | null }> {
   const data = await archive.readChunk('MTRL', mtrlMeta.cno);
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const flags = data.length >= 16 ? dv.getUint16(14, true) : 0;
   const bIndexBase = data[14] ?? 0;
   const cIndexRange = data[15] ?? 0;
+  // BR_MATF_TWO_SIDED = 0x0800; default BRender rendering is single-sided FrontSide
+  const matSide = (flags & 0x0800) !== 0 ? THREE.DoubleSide : THREE.FrontSide;
 
   const tmapKid = archive.findKid(mtrlMeta, 'TMAP', 0) || archive.findKid(mtrlMeta, 'TMAP');
   if (tmapKid) {
     const tmapBytes = await archive.readChunk('TMAP', tmapKid.cno);
     const tex = decodeTmapToTexture(tmapBytes, palette);
     if (tex) {
-      return new THREE.MeshStandardMaterial({
-        map: tex,
-        flatShading: false,
-        roughness: 0.7,
-        metalness: 0.05,
-        side: THREE.DoubleSide,
-      });
+      const txxfKid = archive.findKid(mtrlMeta, 'TXXF', 0) || archive.findKid(mtrlMeta, 'TXXF');
+      if (txxfKid) {
+        const txxfBytes = await archive.readChunk('TXXF', txxfKid.cno);
+        if (txxfBytes.length >= 28) {
+          const tdv = new DataView(txxfBytes.buffer, txxfBytes.byteOffset, txxfBytes.byteLength);
+          const a = readFixed16(tdv, 4);
+          const b = readFixed16(tdv, 8);
+          const c = readFixed16(tdv, 12);
+          const d = readFixed16(tdv, 16);
+          const tx = readFixed16(tdv, 20);
+          const ty = readFixed16(tdv, 24);
+
+          tex.wrapS =
+            Math.abs(a) > 1.005 || Math.abs(c) > 0.01
+              ? THREE.RepeatWrapping
+              : THREE.ClampToEdgeWrapping;
+          tex.wrapT =
+            Math.abs(d) > 1.005 || Math.abs(b) > 0.01
+              ? THREE.RepeatWrapping
+              : THREE.ClampToEdgeWrapping;
+
+          if (Math.abs(b) < 1e-5 && Math.abs(c) < 1e-5) {
+            tex.repeat.set(a, d);
+            tex.offset.set(tx, ty);
+          } else {
+            tex.matrixAutoUpdate = false;
+            tex.matrix.set(a, c, tx, b, d, ty, 0, 0, 1);
+          }
+          tex.needsUpdate = true;
+        }
+      }
+
+      const skinHex = extractSkinHexFromTmap(tmapBytes, palette);
+      return {
+        material: new THREE.MeshStandardMaterial({
+          map: tex,
+          flatShading: false,
+          roughness: 0.7,
+          metalness: 0.05,
+          side: matSide,
+        }),
+        tmapCno: tmapKid.cno,
+        skinHex,
+      };
     }
   }
 
@@ -373,13 +452,17 @@ async function parseMtrlToThree(
     b = palette[palIdx * 3 + 2];
   }
 
-  return new THREE.MeshStandardMaterial({
-    color: new THREE.Color(r / 255, g / 255, b / 255),
-    flatShading: false,
-    roughness: 0.65,
-    metalness: 0.08,
-    side: THREE.DoubleSide,
-  });
+  return {
+    material: new THREE.MeshStandardMaterial({
+      color: new THREE.Color(r / 255, g / 255, b / 255),
+      flatShading: false,
+      roughness: 0.65,
+      metalness: 0.08,
+      side: matSide,
+    }),
+    tmapCno: null,
+    skinHex: null,
+  };
 }
 
 export async function loadDirectMtrl(
@@ -394,12 +477,12 @@ export async function loadDirectMtrl(
       const palette = await loadBasePalette();
       if (overrideArchive) {
         const customMeta = overrideArchive.getChunkMeta('MTRL', mtrlCno);
-        if (customMeta) return await parseMtrlToThree(overrideArchive, customMeta, palette);
+        if (customMeta) return (await parseMtrlToThree(overrideArchive, customMeta, palette)).material;
       }
-      const mtrlsCn = await getArchive('/3dmm/3dmovie/MTRLS.3CN', false);
+      const mtrlsCn = await getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false);
       const meta = mtrlsCn.getChunkMeta('MTRL', mtrlCno);
       if (!meta) return null;
-      return await parseMtrlToThree(mtrlsCn, meta, palette);
+      return (await parseMtrlToThree(mtrlsCn, meta, palette)).material;
     } catch {
       return null;
     }
@@ -413,7 +496,7 @@ export function loadTdfFont(tdfCno: number): Promise<ParsedTdfFont | null> {
   if (cached) return cached;
   const p = (async () => {
     try {
-      const tdfs = await getArchive('/3dmm/3dmovie/TDFS.3CN', false);
+      const tdfs = await getArchive(assetUrl('3dmm/3dmovie/TDFS.3CN'), false);
       const tdfMeta = tdfs.getChunkMeta('TDF ', tdfCno) || tdfs.getChunksByType('TDF ')[0];
       if (!tdfMeta) return null;
       const raw = await tdfs.readChunk('TDF ', tdfMeta.cno);
@@ -436,6 +519,55 @@ export function loadTdfFont(tdfCno: number): Promise<ParsedTdfFont | null> {
   return p;
 }
 
+export const TDF_FONT_OPTIONS = [
+  { tdfCno: 2, name: 'Comic' },
+  { tdfCno: 0, name: 'Arial MT' },
+  { tdfCno: 1, name: 'Arial Round' },
+  { tdfCno: 3, name: 'Gill Sans' },
+  { tdfCno: 4, name: 'Placard' },
+];
+
+export const TDT_SHAPE_OPTIONS = [
+  { tdts: 0, name: 'Straight' },
+  { tdts: 2, name: 'Arch' },
+  { tdts: 1, name: 'Circle' },
+  { tdts: 3, name: 'Mountain' },
+  { tdts: 4, name: 'Valley' },
+  { tdts: 6, name: 'Vertical' },
+  { tdts: 7, name: 'Curved' },
+];
+
+export interface TdtMaterialSwatch {
+  mtrlCno: number;
+  hex: string;
+}
+
+let tdtMaterialSwatchesPromise: Promise<TdtMaterialSwatch[]> | null = null;
+
+export function loadTdtMaterialSwatches(): Promise<TdtMaterialSwatch[]> {
+  if (tdtMaterialSwatchesPromise) return tdtMaterialSwatchesPromise;
+  tdtMaterialSwatchesPromise = (async () => {
+    try {
+      const [palette, mtrlsCn] = await Promise.all([
+        loadBasePalette(),
+        getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false),
+      ]);
+      const swatches: TdtMaterialSwatch[] = [];
+      for (const meta of mtrlsCn.getChunksByType('MTRL')) {
+        if (meta.cno < 25344 || meta.cno > 25360) continue;
+        const parsed = await parseMtrlToThree(mtrlsCn, meta, palette);
+        const std = parsed.material as THREE.MeshStandardMaterial;
+        const hex = std.color ? '#' + std.color.getHexString() : '#f59e0b';
+        swatches.push({ mtrlCno: meta.cno, hex });
+      }
+      return swatches;
+    } catch {
+      return [];
+    }
+  })();
+  return tdtMaterialSwatchesPromise;
+}
+
 /**
  * Builds an authentic 3DMM 3D Text THREE.Group using glyph BMDLs from TDFS.3CN,
  * applying tdts layout shape (0=flat, 1=circle, 2=arch, 6=vertical, 7=curved) and MTRL material.
@@ -449,26 +581,39 @@ export async function buildTdtTextGroup(
   const group = new THREE.Group();
   const [font, tdfs, mtrl] = await Promise.all([
     loadTdfFont(tdfCno),
-    getArchive('/3dmm/3dmovie/TDFS.3CN', false),
+    getArchive(assetUrl('3dmm/3dmovie/TDFS.3CN'), false),
     mtrlCno !== undefined ? loadDirectMtrl(mtrlCno) : Promise.resolve(null),
   ]);
 
-  const material =
-    mtrl ||
-    new THREE.MeshStandardMaterial({
-      color: 0xf59e0b,
-      flatShading: false,
-      roughness: 0.45,
-      metalness: 0.15,
-      side: THREE.DoubleSide,
-    });
+  const material = mtrl
+    ? mtrl.clone()
+    : new THREE.MeshStandardMaterial({
+        color: 0xf59e0b,
+        flatShading: false,
+        roughness: 0.45,
+        metalness: 0.15,
+        side: THREE.DoubleSide,
+      });
+  const baseHex = (material as THREE.MeshStandardMaterial).color
+    ? '#' + (material as THREE.MeshStandardMaterial).color.getHexString()
+    : '#f59e0b';
+  group.userData.baseColor = baseHex;
 
   if (!font) return group;
   const tdfMeta = tdfs.getChunkMeta('TDF ', font.tdfCno);
   if (!tdfMeta) return group;
 
-  const chars = Array.from(text || '');
-  const charCodes = chars.map((ch) => Math.max(32, Math.min(255, ch.charCodeAt(0))));
+  const normalizedText = (text || '')
+    .replace(/\r\n/g, ' ')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-');
+  const chars = Array.from(normalizedText);
+  const charCodes = chars.map((ch) => {
+    const code = ch.charCodeAt(0);
+    return code >= 32 && code <= 255 ? code : 32;
+  });
 
   await Promise.all(
     Array.from(new Set(charCodes)).map(async (code) => {
@@ -477,6 +622,17 @@ export async function buildTdtTextGroup(
       if (kid) {
         const bytes = await tdfs.readChunk('BMDL', kid.cno);
         font.glyphGeos.set(code, parseBmdlGeometry(bytes));
+      } else {
+        // Fallback to swapped ASCII case if glyph BMDL is absent
+        const alt =
+          code >= 97 && code <= 122 ? code - 32 : code >= 65 && code <= 90 ? code + 32 : -1;
+        if (alt >= 32) {
+          const altKid = tdfs.findKid(tdfMeta, 'BMDL', alt);
+          if (altKid) {
+            const bytes = await tdfs.readChunk('BMDL', altKid.cno);
+            font.glyphGeos.set(code, parseBmdlGeometry(bytes));
+          }
+        }
       }
     })
   );
@@ -505,7 +661,6 @@ export async function buildTdtTextGroup(
   }
 
   let curX = -totalWidth * 0.5;
-  const n = Math.max(1, chars.length);
 
   for (let i = 0; i < charCodes.length; i++) {
     const adv = advances[i];
@@ -570,12 +725,20 @@ async function parseCmtl(
   }
   const cbprt = maxChid + 1;
   const materials: THREE.Material[] = [];
+  const colors: string[] = [];
+  const tmapCnos: (number | null)[] = [];
+  const skinHexes: (string | null)[] = [];
   const overrideGeometries: (THREE.BufferGeometry | null)[] = [];
 
   for (let i = 0; i < cbprt; i++) {
     const mKid = archive.findKid(cmtlMeta, 'MTRL', i);
     if (mKid) {
-      materials.push(await parseMtrlToThree(archive, mKid, palette));
+      const parsed = await parseMtrlToThree(archive, mKid, palette);
+      materials.push(parsed.material);
+      tmapCnos.push(parsed.tmapCno);
+      skinHexes.push(parsed.skinHex);
+      const stdMat = parsed.material as THREE.MeshStandardMaterial;
+      colors.push(parsed.skinHex || ('#' + (stdMat.color ? stdMat.color.getHexString() : 'cccccc')));
     } else {
       materials.push(
         new THREE.MeshStandardMaterial({
@@ -584,6 +747,9 @@ async function parseCmtl(
           roughness: 0.68,
         })
       );
+      tmapCnos.push(null);
+      skinHexes.push(null);
+      colors.push('#cccccc');
     }
 
     const bKid = archive.findKid(cmtlMeta, 'BMDL', i);
@@ -595,7 +761,7 @@ async function parseCmtl(
     }
   }
 
-  return { cmid, ibset, materials, overrideGeometries };
+  return { cmid, ibset, materials, colors, tmapCnos, skinHexes, overrideGeometries };
 }
 
 export async function loadAction(
@@ -689,7 +855,7 @@ export function loadTemplate(
   const p = (async () => {
     const [palette, tmplsFile] = await Promise.all([
       loadBasePalette(),
-      overrideArchive ? Promise.resolve(overrideArchive) : getArchive('/3dmm/3dmovie/TMPLS.3CN', false),
+      overrideArchive ? Promise.resolve(overrideArchive) : getArchive(assetUrl('3dmm/3dmovie/TMPLS.3CN'), false),
     ]);
 
     const tmplMeta = tmplsFile.getChunkMeta('TMPL', tmplCno);
@@ -781,6 +947,28 @@ export function loadTemplate(
     const act0 = await loadAction(parsedTemplate, 0);
     if (act0) parsedTemplate.defaultPoseActions.push(act0);
 
+    // Flag isolated inward-wound open shells (e.g., Parachute canopy) that have no outward sibling twin,
+    // so they remain visible from both sides while paired opposing-winding shells stay FrontSide.
+    const geos = Array.from(parsedTemplate.bmdls.values());
+    for (const geo of geos) {
+      const vol = (geo.userData.signedVol as number) ?? 0;
+      const outScore = (geo.userData.outScore as number) ?? 0;
+      if (vol < -5 && outScore < -5 && geo.boundingBox) {
+        const hasOutwardTwin = geos.some((other) => {
+          if (other === geo || !other.boundingBox) return false;
+          const oVol = (other.userData.signedVol as number) ?? 0;
+          if (oVol <= 1) return false;
+          return (
+            other.boundingBox.min.distanceTo(geo.boundingBox!.min) < 1.0 &&
+            other.boundingBox.max.distanceTo(geo.boundingBox!.max) < 1.0
+          );
+        });
+        if (!hasOutwardTwin) {
+          geo.userData.isIsolatedInwardShell = true;
+        }
+      }
+    }
+
     return parsedTemplate;
   })();
 
@@ -813,7 +1001,7 @@ export function instantiateTemplateRig(
     flatShading: false,
     roughness: 0.68,
     metalness: 0.08,
-    side: THREE.DoubleSide,
+    side: THREE.FrontSide,
   });
 
   for (let i = 0; i < cbactPart; i++) {
@@ -842,6 +1030,8 @@ export function instantiateTemplateRig(
     bodyRoot,
     parts,
     meshes,
+    baseMaterialColors: meshes.map(() => new THREE.Color(0xd0d0d0)),
+    overrideGeometries: new Array(cbactPart).fill(null),
     template,
     costumeCmids: costumeCmids ? [...costumeCmids] : [],
     baseScale: 1,
@@ -861,6 +1051,9 @@ export function applyCostumeToRig(
 ) {
   const { template, meshes } = rig;
   const act0 = template.actionCache.get(0);
+  const applyGen = ((rig.root.userData.costumeApplyGen as number) ?? 0) + 1;
+  rig.root.userData.costumeApplyGen = applyGen;
+  rig.overrideGeometries.fill(null);
 
   // Merge default costume per ibset FIRST so partial overrides never leave other body parts untextured!
   const chosenByIbset = new Map<number, ParsedCmtl>();
@@ -880,17 +1073,30 @@ export function applyCostumeToRig(
     let ibmtl = 0;
     for (let iprt = 0; iprt < meshes.length; iprt++) {
       if (template.bodyPartSets[iprt] === cmtl.ibset) {
-        if (ibmtl < cmtl.materials.length) {
-          meshes[iprt].material = cmtl.materials[ibmtl];
-        }
-        const overrideGeo = cmtl.overrideGeometries[ibmtl];
+        const overrideGeo = cmtl.overrideGeometries[ibmtl] ?? null;
+        rig.overrideGeometries[iprt] = overrideGeo;
         if (overrideGeo) {
           meshes[iprt].geometry = overrideGeo;
+          meshes[iprt].visible = true;
         } else {
           const baseChidModl = act0?.cels[0]?.parts[iprt]?.chidModl ?? -1;
           if (baseChidModl < 0) {
-            meshes[iprt].geometry = new THREE.BufferGeometry();
+            meshes[iprt].visible = false;
+          } else {
+            const baseGeo = template.bmdls.get(baseChidModl);
+            if (baseGeo) meshes[iprt].geometry = baseGeo;
+            meshes[iprt].visible = true;
           }
+        }
+
+        if (ibmtl < cmtl.materials.length) {
+          const cloned = cmtl.materials[ibmtl].clone();
+          if (meshes[iprt].geometry?.userData?.isIsolatedInwardShell) {
+            cloned.side = THREE.DoubleSide;
+          }
+          meshes[iprt].material = cloned;
+          const std = cloned as THREE.MeshStandardMaterial;
+          rig.baseMaterialColors[iprt] = std.color ? std.color.clone() : new THREE.Color(0xffffff);
         }
         ibmtl++;
       }
@@ -901,10 +1107,16 @@ export function applyCostumeToRig(
   if (costumeMtrls && costumeMtrls.length > 0) {
     for (const ov of costumeMtrls) {
       void loadDirectMtrl(ov.mtrlCno).then((mat) => {
-        if (!mat) return;
+        if (!mat || rig.root.userData.costumeApplyGen !== applyGen) return;
         for (let iprt = 0; iprt < meshes.length; iprt++) {
           if (template.bodyPartSets[iprt] === ov.ibset) {
-            meshes[iprt].material = mat;
+            const cloned = mat.clone();
+            if (meshes[iprt].geometry?.userData?.isIsolatedInwardShell) {
+              cloned.side = THREE.DoubleSide;
+            }
+            meshes[iprt].material = cloned;
+            const std = cloned as THREE.MeshStandardMaterial;
+            rig.baseMaterialColors[iprt] = std.color ? std.color.clone() : new THREE.Color(0xffffff);
           }
         }
       });
@@ -912,11 +1124,75 @@ export function applyCostumeToRig(
   }
 }
 
+const _tintTmp = new THREE.Color();
+
+export function applyRigColorOverride(rig: TemplateRig, colorHex?: string) {
+  const { meshes, baseMaterialColors } = rig;
+  if (colorHex) {
+    _tintTmp.set(colorHex);
+    for (let i = 0; i < meshes.length; i++) {
+      const mat = meshes[i].material as THREE.MeshStandardMaterial;
+      if (mat && mat.color) {
+        mat.color.copy(_tintTmp);
+      }
+    }
+  } else {
+    for (let i = 0; i < meshes.length; i++) {
+      const mat = meshes[i].material as THREE.MeshStandardMaterial;
+      const base = baseMaterialColors[i];
+      if (mat && mat.color && base) {
+        mat.color.copy(base);
+      }
+    }
+  }
+}
+
+export function applyGroupColorOverride(group: THREE.Group, colorHex?: string) {
+  const targetHex = colorHex || (group.userData.baseColor as string) || '#f59e0b';
+  _tintTmp.set(targetHex);
+  group.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
+    if (mat && mat.color) {
+      mat.color.copy(_tintTmp);
+    }
+  });
+}
+
+const CYCLIC_ACTION_PATTERNS = [
+  /^at rest$/i,
+  /^walk/i,
+  /^run/i,
+  /^crawl/i,
+  /^sneak/i,
+  /^fall$/i,
+  /^fly$/i,
+  /^dance$/i,
+  /^spin/i,
+  /^talk/i,
+  /^laugh$/i,
+  /^mad,\s*sad$/i,
+  /^think$/i,
+  /^yell$/i,
+];
+
+export function isActionCyclic(action?: Pick<ParsedAction, 'name' | 'grfactn'> | null): boolean {
+  if (!action) return false;
+  if ((action.grfactn & 0x08) === 0) return true;
+  const norm = (action.name || '').trim();
+  return CYCLIC_ACTION_PATTERNS.some((re) => re.test(norm));
+}
+
 export function applyActionCelToRig(rig: TemplateRig, action: ParsedAction, frame: number) {
-  if (action.cels.length === 0) return;
-  const icel = ((Math.floor(frame) % action.cels.length) + action.cels.length) % action.cels.length;
+  const len = action.cels.length;
+  if (len === 0) return;
+  const cyclic = isActionCyclic(action);
+  const rawIdx = Math.floor(frame);
+  const icel = cyclic
+    ? ((rawIdx % len) + len) % len
+    : Math.max(0, Math.min(len - 1, rawIdx));
   const cel = action.cels[icel];
-  const { parts, meshes, template } = rig;
+  const { parts, meshes, template, overrideGeometries } = rig;
 
   for (let iprt = 0; iprt < parts.length && iprt < cel.parts.length; iprt++) {
     const spec = cel.parts[iprt];
@@ -924,11 +1200,116 @@ export function applyActionCelToRig(rig: TemplateRig, action: ParsedAction, fram
       parts[iprt].matrix.copy(action.matrices[spec.imat34]);
       parts[iprt].matrixWorldNeedsUpdate = true;
     }
-    if (spec.chidModl >= 0) {
+    const overrideGeo = overrideGeometries[iprt];
+    if (overrideGeo) {
+      if (meshes[iprt].geometry !== overrideGeo) meshes[iprt].geometry = overrideGeo;
+      meshes[iprt].visible = true;
+    } else if (spec.chidModl >= 0) {
       const geo = template.bmdls.get(spec.chidModl);
-      if (geo && meshes[iprt].geometry !== geo) {
-        meshes[iprt].geometry = geo;
+      if (geo) {
+        if (meshes[iprt].geometry !== geo) meshes[iprt].geometry = geo;
+        meshes[iprt].visible = true;
       }
+    } else {
+      meshes[iprt].visible = false;
+    }
+    if (meshes[iprt].geometry?.userData?.isIsolatedInwardShell) {
+      const mat = meshes[iprt].material as THREE.Material | undefined;
+      if (mat && mat.side !== THREE.DoubleSide) {
+        mat.side = THREE.DoubleSide;
+        mat.needsUpdate = true;
+      }
+    }
+  }
+}
+
+const _pA = new THREE.Vector3();
+const _pB = new THREE.Vector3();
+const _qA = new THREE.Quaternion();
+const _qB = new THREE.Quaternion();
+const _sA = new THREE.Vector3();
+const _sB = new THREE.Vector3();
+
+/**
+ * 24 FPS skeletal / part cel blending between adjacent 6 FPS cels.
+ * Smoothly blends position, quaternion (slerp), and scale when body parts match.
+ */
+export function applyActionCelBlendedToRig(rig: TemplateRig, action: ParsedAction, frame: number) {
+  const len = action.cels.length;
+  if (len === 0) return;
+  const cyclic = isActionCyclic(action);
+  if (!cyclic && frame >= len - 1) {
+    applyActionCelToRig(rig, action, len - 1);
+    return;
+  }
+  const clampedFrame = cyclic ? frame : Math.max(0, frame);
+  const baseIdx = Math.floor(clampedFrame);
+  const frac = clampedFrame - baseIdx;
+  if (frac < 1e-3 || len === 1) {
+    applyActionCelToRig(rig, action, clampedFrame);
+    return;
+  }
+
+  const icelA = cyclic ? ((baseIdx % len) + len) % len : Math.max(0, Math.min(len - 1, baseIdx));
+  const icelB = cyclic ? (icelA + 1) % len : Math.min(len - 1, icelA + 1);
+  const celA = action.cels[icelA];
+  const celB = action.cels[icelB];
+  const { parts, meshes, template, overrideGeometries } = rig;
+
+  for (let iprt = 0; iprt < parts.length && iprt < celA.parts.length; iprt++) {
+    const specA = celA.parts[iprt];
+    const specB = iprt < celB.parts.length ? celB.parts[iprt] : null;
+    const overrideGeo = overrideGeometries[iprt];
+    if (overrideGeo) {
+      if (meshes[iprt].geometry !== overrideGeo) meshes[iprt].geometry = overrideGeo;
+      meshes[iprt].visible = true;
+    } else if (specA.chidModl >= 0) {
+      const geo = template.bmdls.get(specA.chidModl);
+      if (geo) {
+        if (meshes[iprt].geometry !== geo) meshes[iprt].geometry = geo;
+        meshes[iprt].visible = true;
+      }
+    } else {
+      meshes[iprt].visible = false;
+    }
+    if (meshes[iprt].geometry?.userData?.isIsolatedInwardShell) {
+      const mat = meshes[iprt].material as THREE.Material | undefined;
+      if (mat && mat.side !== THREE.DoubleSide) {
+        mat.side = THREE.DoubleSide;
+        mat.needsUpdate = true;
+      }
+    }
+
+    if (
+      specB &&
+      specA.chidModl === specB.chidModl &&
+      specA.imat34 >= 0 &&
+      specA.imat34 < action.matrices.length &&
+      specB.imat34 >= 0 &&
+      specB.imat34 < action.matrices.length
+    ) {
+      action.matrices[specA.imat34].decompose(_pA, _qA, _sA);
+      action.matrices[specB.imat34].decompose(_pB, _qB, _sB);
+      _qA.normalize();
+      _qB.normalize();
+      if (
+        Number.isFinite(_qA.x) &&
+        Number.isFinite(_qB.x) &&
+        Number.isFinite(_sA.x) &&
+        Number.isFinite(_sB.x)
+      ) {
+        _pA.lerp(_pB, frac);
+        _qA.slerp(_qB, frac).normalize();
+        _sA.lerp(_sB, frac);
+        parts[iprt].matrix.compose(_pA, _qA, _sA);
+        parts[iprt].matrixWorldNeedsUpdate = true;
+      } else {
+        parts[iprt].matrix.copy(action.matrices[specA.imat34]);
+        parts[iprt].matrixWorldNeedsUpdate = true;
+      }
+    } else if (specA.imat34 >= 0 && specA.imat34 < action.matrices.length) {
+      parts[iprt].matrix.copy(action.matrices[specA.imat34]);
+      parts[iprt].matrixWorldNeedsUpdate = true;
     }
   }
 }
@@ -943,7 +1324,9 @@ export function applyPropActionTransform(
   frame: number,
   totalFrames: number,
   baseScale = 1,
-  baseRotY = 0
+  baseRotY = 0,
+  baseRotX = 0,
+  baseRotZ = 0
 ) {
   const safeTotal = Math.max(totalFrames, 1);
   const t = Math.min(Math.max(frame / safeTotal, 0), 1);
@@ -977,7 +1360,7 @@ export function applyPropActionTransform(
   }
 
   meshRoot.scale.setScalar(baseScale * scaleFactor);
-  meshRoot.rotation.y = baseRotY + rotOffset;
+  meshRoot.rotation.set(baseRotX, baseRotY + rotOffset, baseRotZ, 'YXZ');
 }
 
 const _tmpScale = new THREE.Vector3();
@@ -994,7 +1377,7 @@ export function loadBackgroundView(bkgdCno: number, icam: number): Promise<Loade
   const p = (async () => {
     const [basePal, bkgdsCn] = await Promise.all([
       loadBasePalette(),
-      getArchive('/3dmm/3dmovie/BKGDS.3CN', false),
+      getArchive(assetUrl('3dmm/3dmovie/BKGDS.3CN'), false),
     ]);
 
     const bkgdMeta = bkgdsCn.getChunkMeta('BKGD', bkgdCno);
@@ -1161,10 +1544,10 @@ export function preloadThreeDmmAssets(catalog: ThreeDmmCatalog): Promise<void> {
   preloadPromise = (async () => {
     // 1. Ensure shared archives are fetched & indexed
     const archiveJobs = Promise.allSettled([
-      getArchive('/3dmm/3dmovie/MTRLS.3CN', false),
-      getArchive('/3dmm/3dmovie/TDFS.3CN', false),
-      getArchive('/3dmm/3dmovie/SNDS.3CN', false),
-      getArchive('/3dmm/3dmovie/SOUND.3TH', true),
+      getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false),
+      getArchive(assetUrl('3dmm/3dmovie/TDFS.3CN'), false),
+      getArchive(assetUrl('3dmm/3dmovie/SNDS.3CN'), false),
+      getArchive(assetUrl('3dmm/3dmovie/SOUND.3TH'), true),
     ]);
 
     // 2. Immediately warm all camera views of the opening scene

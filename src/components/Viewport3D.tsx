@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { KeyframePosition, PropAction, Scene } from '../types/movie';
 import {
-  applyActionCelToRig,
+  applyActionCelBlendedToRig,
   applyCostumeToRig,
+  applyGroupColorOverride,
   applyPropActionTransform,
+  applyRigColorOverride,
   buildTdtTextGroup,
   instantiateTemplateRig,
   loadAction,
@@ -15,35 +17,52 @@ import {
   TemplateRig,
 } from '../services/threeDmmEngine';
 import { sound3DMM } from '../services/soundLibrary';
+import { assetUrl } from '../utils/assetUrl';
+
+export type StageEntityType = 'actor' | 'prop' | 'tdt';
+
+export interface LivePlayheadState {
+  sceneIndex: number;
+  frame: number;
+  renderFrame: number;
+}
 
 interface Viewport3DProps {
   sceneData: Scene;
   sceneIndex?: number;
   totalScenes?: number;
   currentFrame: number;
+  renderFrame?: number;
+  isPlaying?: boolean;
+  livePlayheadRef?: React.MutableRefObject<LivePlayheadState>;
   selectedEntityId: string | null;
-  onSelectEntity: (id: string | null, type: 'actor' | 'prop' | null) => void;
+  onSelectEntity: (id: string | null, type: StageEntityType | null) => void;
   onStageViewReady?: (view: LoadedBackgroundView) => void;
+  moveUpDownMode: boolean;
+  onToggleMoveUpDown: () => void;
+  rotateMode: boolean;
+  onToggleRotateMode: () => void;
   isRecordingMovement: boolean;
   onBeginRecordingAtFrame: (
     entityId: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     startFrame: number,
-    pos: { x: number; y: number; z: number; rotY: number }
+    pos: KeyframePosition
   ) => void;
   onRecordMovementStep: (
     entityId: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     frame: number,
-    pos: { x: number; y: number; z: number; rotY: number },
+    pos: KeyframePosition,
     advancePlayhead: boolean
   ) => void;
   onMoveEntityAtFrame: (
     entityId: string,
-    type: 'actor' | 'prop',
+    type: StageEntityType,
     frame: number,
-    pos: { x: number; y: number; z: number; rotY: number },
+    pos: KeyframePosition,
     deltaX: number,
+    deltaY: number,
     deltaZ: number
   ) => void;
 }
@@ -56,6 +75,11 @@ const _screenPtA = new THREE.Vector3();
 const _screenPtB = new THREE.Vector3();
 const _eulerTrim = new THREE.Euler(0, 0, 0, 'YXZ');
 const _quatTrim = new THREE.Quaternion();
+const _eulerRotA = new THREE.Euler(0, 0, 0, 'YXZ');
+const _eulerRotB = new THREE.Euler(0, 0, 0, 'YXZ');
+const _eulerRotOut = new THREE.Euler(0, 0, 0, 'YXZ');
+const _quatRotA = new THREE.Quaternion();
+const _quatRotB = new THREE.Quaternion();
 const _dragBox = new THREE.Box3();
 const _dragSize = new THREE.Vector3();
 const _dragCenter = new THREE.Vector3();
@@ -76,7 +100,7 @@ function disposeRig(obj: THREE.Object3D) {
 function storageToWorld(
   sceneData: Scene,
   bgView: LoadedBackgroundView | null,
-  kf: { x: number; y: number; z: number; rotY?: number },
+  kf: { x: number; y: number; z: number; rotX?: number; rotY?: number; rotZ?: number },
   outPos: THREE.Vector3
 ): number {
   if (sceneData.coordMode === 'world' || !bgView) {
@@ -101,10 +125,19 @@ function worldToStorage(
   wx: number,
   wy: number,
   wz: number,
-  worldRotY: number
+  worldRotY: number,
+  rotX = 0,
+  rotZ = 0
 ): KeyframePosition {
   if (sceneData.coordMode === 'world' || !bgView) {
-    return { x: wx, y: wy, z: wz, rotY: worldRotY };
+    return {
+      x: wx,
+      y: wy,
+      z: wz,
+      rotY: worldRotY,
+      ...(Math.abs(rotX) > 1e-4 ? { rotX } : {}),
+      ...(Math.abs(rotZ) > 1e-4 ? { rotZ } : {}),
+    };
   }
   const o = bgView.stageOrigin;
   const r = bgView.camRightXZ;
@@ -126,6 +159,8 @@ function worldToStorage(
     y: dy,
     z: sz,
     rotY: worldRotY - facingCamRotY,
+    ...(Math.abs(rotX) > 1e-4 ? { rotX } : {}),
+    ...(Math.abs(rotZ) > 1e-4 ? { rotZ } : {}),
   };
 }
 
@@ -190,10 +225,10 @@ export function resolveActorActionAtFrame(
 export function resolvePropActionAtFrame(
   prop: Scene['props'][number],
   frame: number
-): { action: PropAction; startFrame: number; celOffset: number; freeze: boolean } {
+): { action: PropAction; anid?: number; startFrame: number; celOffset: number; freeze: boolean } {
   const akfs = prop.actionKeyframes;
   if (!akfs) {
-    return { action: prop.action, startFrame: 0, celOffset: 0, freeze: false };
+    return { action: prop.action, anid: prop.anid, startFrame: 0, celOffset: 0, freeze: false };
   }
   const frames = Object.keys(akfs).map(Number).sort((a, b) => a - b);
   let chosenFrame = -1;
@@ -204,23 +239,57 @@ export function resolvePropActionAtFrame(
   if (chosenFrame >= 0) {
     return {
       action: akfs[chosenFrame].action,
+      anid: akfs[chosenFrame].anid,
       startFrame: chosenFrame,
       celOffset: akfs[chosenFrame].celOffset ?? 0,
       freeze: Boolean(akfs[chosenFrame].freeze),
     };
   }
-  return { action: prop.action, startFrame: 0, celOffset: 0, freeze: false };
+  return { action: prop.action, anid: prop.anid, startFrame: 0, celOffset: 0, freeze: false };
 }
 
-function catmullRomScalar(p0: number, p1: number, p2: number, p3: number, t: number): number {
-  const t2 = t * t;
-  const t3 = t2 * t;
+function evalMonotoneHermiteSegment(
+  p1: number,
+  p2: number,
+  u: number,
+  dt: number,
+  hasPrev: boolean,
+  p0: number,
+  dtPrev: number,
+  hasNext: boolean,
+  p3: number,
+  dtNext: number
+): number {
+  const safeDt = Math.max(1e-4, dt);
+  const vCur = (p2 - p1) / safeDt;
+
+  let m1 = 0;
+  if (hasPrev) {
+    const vPrev = (p1 - p0) / Math.max(1e-4, dtPrev);
+    if (vPrev * vCur > 0) {
+      const w1 = 2 * safeDt + dtPrev;
+      const w2 = safeDt + 2 * dtPrev;
+      m1 = ((w1 + w2) / (w1 / vPrev + w2 / vCur)) * safeDt;
+    }
+  }
+
+  let m2 = 0;
+  if (hasNext) {
+    const vNext = (p3 - p2) / Math.max(1e-4, dtNext);
+    if (vCur * vNext > 0) {
+      const w1 = 2 * dtNext + safeDt;
+      const w2 = dtNext + 2 * safeDt;
+      m2 = ((w1 + w2) / (w1 / vCur + w2 / vNext)) * safeDt;
+    }
+  }
+
+  const u2 = u * u;
+  const u3 = u2 * u;
   return (
-    0.5 *
-    (2 * p1 +
-      (-p0 + p2) * t +
-      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
-      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+    (2 * u3 - 3 * u2 + 1) * p1 +
+    (u3 - 2 * u2 + u) * m1 +
+    (-2 * u3 + 3 * u2) * p2 +
+    (u3 - u2) * m2
   );
 }
 
@@ -234,14 +303,31 @@ function dist3D(a: KeyframePosition, b: KeyframePosition): number {
   return Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
 }
 
+const _colA = new THREE.Color();
+const _colB = new THREE.Color();
+const _colMix = new THREE.Color();
+
+function lerpColorHex(hexA?: string, hexB?: string, t = 0): string | undefined {
+  if (!hexA && !hexB) return undefined;
+  const a = hexA || hexB!;
+  const b = hexB || hexA!;
+  if (a.toLowerCase() === b.toLowerCase() || t <= 0) return a;
+  if (t >= 1) return b;
+  _colA.set(a);
+  _colB.set(b);
+  _colMix.copy(_colA).lerp(_colB, t);
+  return '#' + _colMix.getHexString();
+}
+
 /**
- * Resolves entity transform at frame with smooth & curved interpolation
- * for small/close movements (<= 22 units), and no interpolation (snap)
- * for farther/bigger movements (> 22 units).
+ * Resolves entity transform & color at frame (supports 60+ FPS fractional subframes!)
+ * with C1-continuous, overshoot-free time-aware monotone cubic Hermite interpolation
+ * for smooth multi-keyframe paths (<= 22 units), and clean snap for farther jumps (> 22 units).
  */
 export function resolveInterpolatedKeyframe(
   keyframes: Record<number, KeyframePosition>,
-  frame: number
+  frame: number,
+  defaultColor?: string
 ): KeyframePosition {
   if (keyframes[frame]) return keyframes[frame];
   const frames = Object.keys(keyframes).map(Number).sort((a, b) => a - b);
@@ -256,15 +342,27 @@ export function resolveInterpolatedKeyframe(
   const p1 = keyframes[f1];
   const p2 = keyframes[f2];
 
+  // Resolve inherited colors for color interpolation
+  let c1 = p1.color;
+  if (!c1) {
+    for (let k = i - 1; k >= 0; k--) {
+      if (keyframes[frames[k]].color) {
+        c1 = keyframes[frames[k]].color;
+        break;
+      }
+    }
+    if (!c1) c1 = defaultColor;
+  }
+  const c2 = p2.color || c1;
+
   // Hidden segments or larger/farther movements snap cleanly with no interpolation
   const dist = dist3D(p1, p2);
   if (p1.visible === false || p2.visible === false || dist > INTERP_JUMP_THRESHOLD) {
-    return p1;
+    return c1 && p1.color !== c1 ? { ...p1, color: c1 } : p1;
   }
 
-  const rawT = (frame - f1) / Math.max(1, f2 - f1);
-  // Smooth ease-in-out timing curve
-  const t = rawT * rawT * (3 - 2 * rawT);
+  const dt = Math.max(1e-4, f2 - f1);
+  const rawT = Math.max(0, Math.min(1, (frame - f1) / dt));
 
   const hasPrev =
     i > 0 &&
@@ -276,27 +374,8 @@ export function resolveInterpolatedKeyframe(
     dist3D(p2, keyframes[frames[i + 2]]) <= INTERP_JUMP_THRESHOLD;
   const p0 = hasPrev ? keyframes[frames[i - 1]] : p1;
   const p3 = hasNext ? keyframes[frames[i + 2]] : p2;
-
-  let x = catmullRomScalar(p0.x, p1.x, p2.x, p3.x, t);
-  const y = catmullRomScalar(p0.y, p1.y, p2.y, p3.y, t);
-  let z = catmullRomScalar(p0.z, p1.z, p2.z, p3.z, t);
-
-  // Add subtle natural curved arc on 2-keyframe or nearly collinear segments
-  const dx = p2.x - p1.x;
-  const dz = p2.z - p1.z;
-  const chordXZ = Math.hypot(dx, dz);
-  if (chordXZ > 0.15) {
-    const linX = p1.x + dx * t;
-    const linZ = p1.z + dz * t;
-    const existingBend = Math.hypot(x - linX, z - linZ);
-    if (existingBend < chordXZ * 0.04) {
-      const perpX = -dz / chordXZ;
-      const perpZ = dx / chordXZ;
-      const arcAmt = Math.sin(Math.PI * rawT) * Math.min(chordXZ * 0.16, 1.8);
-      x += perpX * arcAmt;
-      z += perpZ * arcAmt;
-    }
-  }
+  const dtPrev = hasPrev ? f1 - frames[i - 1] : dt;
+  const dtNext = hasNext ? frames[i + 2] - f2 : dt;
 
   const s1x = p1.scaleX ?? 1;
   const s1y = p1.scaleY ?? 1;
@@ -305,15 +384,75 @@ export function resolveInterpolatedKeyframe(
   const s2y = p2.scaleY ?? 1;
   const s2z = p2.scaleZ ?? 1;
 
+  let x: number;
+  let y: number;
+  let z: number;
+  let sx: number;
+  let sy: number;
+  let sz: number;
+  let rotT: number;
+
+  if (!hasPrev && !hasNext) {
+    // Isolated 2-keyframe move: smooth S-curve from rest to rest + fixed gentle XZ arc
+    const easeT = rawT * rawT * (3 - 2 * rawT);
+    x = p1.x + (p2.x - p1.x) * easeT;
+    y = p1.y + (p2.y - p1.y) * easeT;
+    z = p1.z + (p2.z - p1.z) * easeT;
+
+    const dx = p2.x - p1.x;
+    const dz = p2.z - p1.z;
+    const chordXZ = Math.hypot(dx, dz);
+    if (chordXZ > 0.15) {
+      const perpX = -dz / chordXZ;
+      const perpZ = dx / chordXZ;
+      const arcAmt = Math.sin(Math.PI * easeT) * Math.min(chordXZ * 0.14, 1.5);
+      x += perpX * arcAmt;
+      z += perpZ * arcAmt;
+    }
+
+    sx = s1x + (s2x - s1x) * easeT;
+    sy = s1y + (s2y - s1y) * easeT;
+    sz = s1z + (s2z - s1z) * easeT;
+    rotT = easeT;
+  } else {
+    // Connected multi-keyframe path: C1-continuous, monotone (zero overshoot / zero stop-and-go pulse)
+    x = evalMonotoneHermiteSegment(p1.x, p2.x, rawT, dt, hasPrev, p0.x, dtPrev, hasNext, p3.x, dtNext);
+    y = evalMonotoneHermiteSegment(p1.y, p2.y, rawT, dt, hasPrev, p0.y, dtPrev, hasNext, p3.y, dtNext);
+    z = evalMonotoneHermiteSegment(p1.z, p2.z, rawT, dt, hasPrev, p0.z, dtPrev, hasNext, p3.z, dtNext);
+
+    const s0x = p0.scaleX ?? 1;
+    const s0y = p0.scaleY ?? 1;
+    const s0z = p0.scaleZ ?? 1;
+    const s3x = p3.scaleX ?? 1;
+    const s3y = p3.scaleY ?? 1;
+    const s3z = p3.scaleZ ?? 1;
+    sx = Math.max(0.05, evalMonotoneHermiteSegment(s1x, s2x, rawT, dt, hasPrev, s0x, dtPrev, hasNext, s3x, dtNext));
+    sy = Math.max(0.05, evalMonotoneHermiteSegment(s1y, s2y, rawT, dt, hasPrev, s0y, dtPrev, hasNext, s3y, dtNext));
+    sz = Math.max(0.05, evalMonotoneHermiteSegment(s1z, s2z, rawT, dt, hasPrev, s0z, dtPrev, hasNext, s3z, dtNext));
+    rotT = rawT;
+  }
+
+  const mixedColor = c1 || c2 ? lerpColorHex(c1, c2, rotT) : undefined;
+
+  _eulerRotA.set(p1.rotX || 0, p1.rotY || 0, p1.rotZ || 0, 'YXZ');
+  _eulerRotB.set(p2.rotX || 0, p2.rotY || 0, p2.rotZ || 0, 'YXZ');
+  _quatRotA.setFromEuler(_eulerRotA);
+  _quatRotB.setFromEuler(_eulerRotB);
+  _quatRotA.slerp(_quatRotB, rotT);
+  _eulerRotOut.setFromQuaternion(_quatRotA, 'YXZ');
+
   return {
     x,
     y,
     z,
-    rotY: lerpShortestAngle(p1.rotY || 0, p2.rotY || 0, t),
-    scaleX: s1x + (s2x - s1x) * t,
-    scaleY: s1y + (s2y - s1y) * t,
-    scaleZ: s1z + (s2z - s1z) * t,
+    ...(Math.abs(_eulerRotOut.x) > 1e-4 ? { rotX: _eulerRotOut.x } : {}),
+    rotY: _eulerRotOut.y,
+    ...(Math.abs(_eulerRotOut.z) > 1e-4 ? { rotZ: _eulerRotOut.z } : {}),
+    scaleX: sx,
+    scaleY: sy,
+    scaleZ: sz,
     visible: p1.visible,
+    ...(mixedColor ? { color: mixedColor } : {}),
   };
 }
 
@@ -331,15 +470,24 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   sceneIndex = 0,
   totalScenes = 1,
   currentFrame,
+  renderFrame,
+  isPlaying = false,
+  livePlayheadRef,
   selectedEntityId,
   onSelectEntity,
   onStageViewReady,
+  moveUpDownMode,
+  onToggleMoveUpDown,
+  rotateMode,
+  onToggleRotateMode,
   isRecordingMovement,
   onBeginRecordingAtFrame,
   onRecordMovementStep,
   onMoveEntityAtFrame,
 }) => {
+  const wellRef = useRef<HTMLDivElement>(null);
   const mountRef = useRef<HTMLDivElement>(null);
+  const [stageBoxSize, setStageBoxSize] = useState<{ w: number; h: number }>({ w: 544, h: 306 });
   const [backdropUrl, setBackdropUrl] = useState<string | null>(null);
   const [loadingStage, setLoadingStage] = useState<boolean>(true);
 
@@ -348,12 +496,17 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const depthPrePassMatRef = useRef<THREE.ShaderMaterial | null>(null);
   const depthPrePassMeshRef = useRef<THREE.Mesh | null>(null);
+  const floorShadowMatRef = useRef<THREE.ShaderMaterial | null>(null);
+  const floorShadowMeshRef = useRef<THREE.Mesh | null>(null);
+  const keyLightRef = useRef<THREE.DirectionalLight | null>(null);
+  const fillLightRef = useRef<THREE.DirectionalLight | null>(null);
 
   const bgViewRef = useRef<LoadedBackgroundView | null>(null);
   const actorRigsRef = useRef<Map<string, TemplateRig>>(new Map());
   const propRigsRef = useRef<Map<string, TemplateRig>>(new Map());
   const tdtGroupsRef = useRef<Map<string, THREE.Group>>(new Map());
   const activeActionsRef = useRef<Map<string, ParsedAction>>(new Map());
+  const textBoxInnerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const actorsGroupRef = useRef<THREE.Group>(new THREE.Group());
   const propsGroupRef = useRef<THREE.Group>(new THREE.Group());
@@ -370,12 +523,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   const isDraggingRef = useRef(false);
   const hasStartedDragMoveRef = useRef(false);
   const dragEntityIdRef = useRef<string | null>(null);
-  const dragEntityTypeRef = useRef<'actor' | 'prop' | null>(null);
+  const dragEntityTypeRef = useRef<StageEntityType | null>(null);
   const pointerDownClientRef = useRef({ x: 0, y: 0 });
   const lastPointerClientRef = useRef({ x: 0, y: 0 });
-  const dragStartWorldPosRef = useRef({ x: 0, y: 0, z: 0, rotY: 0 });
-  const dragLiveWorldPosRef = useRef({ x: 0, y: 0, z: 0, rotY: 0 });
-  const prevStoragePosRef = useRef({ x: 0, z: 0 });
+  const dragStartWorldPosRef = useRef({ x: 0, y: 0, z: 0, rotX: 0, rotY: 0, rotZ: 0 });
+  const dragLiveWorldPosRef = useRef({ x: 0, y: 0, z: 0, rotX: 0, rotY: 0, rotZ: 0 });
+  const prevStoragePosRef = useRef({ x: 0, y: 0, z: 0 });
   const lastHeadingPosRef = useRef({ x: 0, z: 0 });
   const recordingFrameRef = useRef(0);
   const recordingIntervalRef = useRef<number | null>(null);
@@ -385,6 +538,17 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
   const currentFrameRef = useRef(currentFrame);
   currentFrameRef.current = currentFrame;
+  const sceneIndexRef = useRef(sceneIndex);
+  sceneIndexRef.current = sceneIndex;
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const livePlayheadPropRef = useRef(livePlayheadRef);
+  livePlayheadPropRef.current = livePlayheadRef;
+  const applyStageAtFrameRef = useRef<(evalFrame: number) => void>(() => {});
+  const moveUpDownModeRef = useRef(moveUpDownMode);
+  moveUpDownModeRef.current = moveUpDownMode;
+  const rotateModeRef = useRef(rotateMode);
+  rotateModeRef.current = rotateMode;
   const isRecordingMovementRef = useRef(isRecordingMovement);
   isRecordingMovementRef.current = isRecordingMovement;
   const selectedEntityIdRef = useRef(selectedEntityId);
@@ -401,6 +565,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   onMoveEntityAtFrameRef.current = onMoveEntityAtFrame;
 
   const [syncVersion, setSyncVersion] = useState(0);
+  const [webglError, setWebglError] = useState<string | null>(null);
 
   const activeCam = resolveActiveCameraAtFrame(sceneData, currentFrame);
 
@@ -411,7 +576,33 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     }
   };
 
-  // Initialize transparent WebGL canvas + ZBMP depth-prepass shader over decoded 544x306 MBMP backdrop
+  // Exact 544:306 stage well fitter so ZBMP, MBMP, and camera aspect NEVER drift apart
+  useEffect(() => {
+    const well = wellRef.current;
+    if (!well) return;
+    const fit = () => {
+      const availW = Math.max(160, well.clientWidth - 16);
+      const availH = Math.max(90, well.clientHeight - 16);
+      const ratio = 544 / 306;
+      let w = availW;
+      let h = w / ratio;
+      if (h > availH) {
+        h = availH;
+        w = h * ratio;
+      }
+      setStageBoxSize({ w: Math.floor(w), h: Math.floor(h) });
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(well);
+    window.addEventListener('resize', fit);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', fit);
+    };
+  }, []);
+
+  // Initialize transparent WebGL canvas + ZBMP depth-prepass + ZBMP Floor-Only Shadow shader
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
@@ -436,24 +627,30 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
-    // Official 3DMM 544x306 camera frustum
-    const camera = new THREE.PerspectiveCamera(47, width / height, 1.0, 5000);
+    // Official 3DMM 544x306 camera frustum (aspect strictly locked to 544/306)
+    const camera = new THREE.PerspectiveCamera(47, 544 / 306, 1.0, 5000);
     camera.position.set(0, 12, 60);
     camera.lookAt(0, 4, 0);
     camera.updateMatrixWorld();
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({
-      alpha: true,
-      antialias: !isSoftwareGl,
-      powerPreference: 'high-performance',
-    });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        alpha: true,
+        antialias: !isSoftwareGl,
+        powerPreference: 'high-performance',
+      });
+    } catch (err) {
+      setWebglError(err instanceof Error ? err.message : 'WebGL context could not be initialized.');
+      return;
+    }
     renderer.setClearColor(0x000000, 0);
     renderer.setSize(width, height);
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.shadowMap.enabled = !isSoftwareGl;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.domElement.style.touchAction = 'none';
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
@@ -501,29 +698,162 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     depthPrePassMatRef.current = depthMat;
     depthPrePassMeshRef.current = depthMesh;
 
+    // ZBMP Depth-Map Real Ground Shadow Pass:
+    // Reconstructs W(uv) and surface normal N(uv) from the 16-bit ZBMP depth buffer and evaluates
+    // Three.js keyLight's real PCF shadow map onto upward-facing stage floors, ramps & steps.
+    const floorShadowMat = new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.merge([
+        THREE.UniformsLib.lights,
+        {
+          uZbmp: { value: null },
+          uInvViewProj: { value: new THREE.Matrix4() },
+          uLightShadowMatrix: { value: new THREE.Matrix4() },
+        },
+      ]),
+      lights: true,
+      vertexShader: `
+        varying vec2 vUv;
+        #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+          varying vec4 vDirectionalShadowCoord[ NUM_DIR_LIGHT_SHADOWS ];
+        #endif
+        void main() {
+          vUv = uv;
+          #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+            vDirectionalShadowCoord[ 0 ] = vec4( 0.0 );
+          #endif
+          gl_Position = vec4( position.xy, 0.0, 1.0 );
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uZbmp;
+        uniform mat4 uInvViewProj;
+        uniform mat4 uLightShadowMatrix;
+        varying vec2 vUv;
+
+        #include <common>
+        #include <packing>
+        #include <shadowmap_pars_fragment>
+
+        float readZ16(vec2 uv) {
+          vec4 t = texture2D(uZbmp, clamp(uv, 0.0, 1.0));
+          return floor(t.r * 255.0 + 0.5) * 256.0 + floor(t.g * 255.0 + 0.5);
+        }
+
+        vec3 unprojectWorld(vec2 uv, float z16) {
+          vec4 ndc = vec4(uv * 2.0 - 1.0, z16 / 32768.0, 1.0);
+          vec4 w = uInvViewProj * ndc;
+          return w.xyz / max(w.w, 0.0001);
+        }
+
+        void main() {
+          #if !defined( USE_SHADOWMAP ) || NUM_DIR_LIGHT_SHADOWS <= 0
+            discard;
+          #else
+            float zC = readZ16(vUv);
+            if (zC >= 32767.0) discard;
+
+            // 3-texel symmetric finite differences reconstruct world normal of the ZBMP surface
+            vec2 stepX = vec2(3.0 / 544.0, 0.0);
+            vec2 stepY = vec2(0.0, 3.0 / 306.0);
+            vec2 uvR = clamp(vUv + stepX, 0.0, 1.0);
+            vec2 uvL = clamp(vUv - stepX, 0.0, 1.0);
+            vec2 uvU = clamp(vUv + stepY, 0.0, 1.0);
+            vec2 uvD = clamp(vUv - stepY, 0.0, 1.0);
+
+            float zR = readZ16(uvR);
+            float zL = readZ16(uvL);
+            float zU = readZ16(uvU);
+            float zD = readZ16(uvD);
+
+            vec3 wC = unprojectWorld(vUv, zC);
+            vec3 dX = vec3(0.0);
+            bool okR = zR < 32767.0 && abs(zR - zC) < 1400.0;
+            bool okL = zL < 32767.0 && abs(zL - zC) < 1400.0;
+            if (okR && okL) dX = unprojectWorld(uvR, zR) - unprojectWorld(uvL, zL);
+            else if (okR) dX = unprojectWorld(uvR, zR) - wC;
+            else if (okL) dX = wC - unprojectWorld(uvL, zL);
+            else discard;
+
+            vec3 dY = vec3(0.0);
+            bool okU = zU < 32767.0 && abs(zU - zC) < 1400.0;
+            bool okD = zD < 32767.0 && abs(zD - zC) < 1400.0;
+            if (okU && okD) dY = unprojectWorld(uvU, zU) - unprojectWorld(uvD, zD);
+            else if (okU) dY = unprojectWorld(uvU, zU) - wC;
+            else if (okD) dY = wC - unprojectWorld(uvD, zD);
+            else discard;
+
+            vec3 nrm = normalize(cross(dX, dY));
+            if (nrm.y < 0.0) nrm = -nrm;
+
+            // Cast real shadows onto upward-facing ZBMP ground/floor/step surfaces only
+            float floorMask = smoothstep(0.28, 0.65, nrm.y);
+            if (floorMask < 0.01) discard;
+
+            vec4 shadowCoord = uLightShadowMatrix * vec4(wC + nrm * 0.08, 1.0);
+            DirectionalLightShadow dirShadow = directionalLightShadows[0];
+            float lit = getShadow(
+              directionalShadowMap[0],
+              dirShadow.shadowMapSize,
+              dirShadow.shadowIntensity,
+              dirShadow.shadowBias,
+              dirShadow.shadowRadius,
+              shadowCoord
+            );
+
+            float shadowAmt = clamp(1.0 - lit, 0.0, 1.0);
+            float alpha = clamp(shadowAmt * floorMask * 0.44, 0.0, 0.46);
+            if (alpha < 0.008) discard;
+            gl_FragColor = vec4(0.0, 0.0, 0.0, alpha);
+          #endif
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    const floorShadowGeo = new THREE.PlaneGeometry(2, 2);
+    const floorShadowMesh = new THREE.Mesh(floorShadowGeo, floorShadowMat);
+    floorShadowMesh.frustumCulled = false;
+    floorShadowMesh.receiveShadow = true;
+    floorShadowMesh.renderOrder = -900;
+    floorShadowMesh.visible = false;
+    scene.add(floorShadowMesh);
+    floorShadowMatRef.current = floorShadowMat;
+    floorShadowMeshRef.current = floorShadowMesh;
+
     // 3DMM Studio Lighting Rig (smooth Gouraud illumination)
     const hemi = new THREE.HemisphereLight('#ffffff', '#334155', 1.45);
     scene.add(hemi);
 
     const keyLight = new THREE.DirectionalLight('#fffbeb', 1.65);
-    keyLight.position.set(30, 80, 40);
-    keyLight.castShadow = !isSoftwareGl;
-    if (keyLight.castShadow) {
-      keyLight.shadow.mapSize.set(1024, 1024);
-      keyLight.shadow.camera.near = 1;
-      keyLight.shadow.camera.far = 250;
-      keyLight.shadow.camera.left = -45;
-      keyLight.shadow.camera.right = 45;
-      keyLight.shadow.camera.top = 45;
-      keyLight.shadow.camera.bottom = -45;
-    }
+    keyLight.position.set(28, 88, 32);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(isSoftwareGl ? 1024 : 2048, isSoftwareGl ? 1024 : 2048);
+    keyLight.shadow.camera.near = 4;
+    keyLight.shadow.camera.far = 260;
+    keyLight.shadow.camera.left = -85;
+    keyLight.shadow.camera.right = 85;
+    keyLight.shadow.camera.top = 85;
+    keyLight.shadow.camera.bottom = -85;
+    keyLight.shadow.bias = -0.0006;
+    keyLight.shadow.normalBias = 0.03;
+    keyLight.shadow.radius = 2.5;
     scene.add(keyLight);
+    scene.add(keyLight.target);
+    keyLightRef.current = keyLight;
+
+    floorShadowMesh.onBeforeRender = () => {
+      floorShadowMat.uniforms.uLightShadowMatrix.value.copy(keyLight.shadow.matrix);
+    };
 
     const fillLight = new THREE.DirectionalLight('#dbeafe', 0.85);
     fillLight.position.set(-40, 30, -25);
     scene.add(fillLight);
+    scene.add(fillLight.target);
+    fillLightRef.current = fillLight;
 
-    // Shadow catcher ground plane under actors (does not clobber ZBMP depth buffer)
+    // Fallback ground plane strictly when camera look is trimmed away from ZBMP
     const shadowMat = new THREE.ShadowMaterial({
       opacity: 0.34,
       depthWrite: false,
@@ -534,6 +864,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     shadowPlane.rotation.x = -Math.PI / 2;
     shadowPlane.receiveShadow = true;
     shadowPlane.renderOrder = -500;
+    shadowPlane.visible = false;
     scene.add(shadowPlane);
     shadowPlaneRef.current = shadowPlane;
 
@@ -588,6 +919,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     };
 
     const tick = () => {
+      if (isPlayingRef.current) {
+        const live = livePlayheadPropRef.current?.current;
+        if (live && live.sceneIndex === sceneIndexRef.current) {
+          applyStageAtFrameRef.current(live.renderFrame);
+        }
+      }
       if (rendererRef.current && sceneRef.current && cameraRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
@@ -601,7 +938,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       const w = mount.clientWidth;
       const h = mount.clientHeight;
       if (w <= 0 || h <= 0) return;
-      cameraRef.current.aspect = w / h;
+      // Lock camera aspect to exact 544/306 so ZBMP/MBMP and WebGL stay pixel-locked
+      cameraRef.current.aspect = 544 / 306;
       cameraRef.current.updateProjectionMatrix();
       rendererRef.current.setSize(w, h);
     };
@@ -621,6 +959,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       sharedCurDotMatRef.current?.dispose();
       depthGeo.dispose();
       depthMat.dispose();
+      floorShadowGeo.dispose();
+      floorShadowMat.dispose();
       shadowPlane.geometry.dispose();
       shadowMat.dispose();
       if (renderer.domElement && mount.contains(renderer.domElement)) {
@@ -658,6 +998,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         if (cameraRef.current) {
           const cam = cameraRef.current;
           cam.fov = bgView.fovDeg;
+          cam.aspect = 544 / 306;
           cam.near = bgView.hither;
           cam.far = bgView.yon;
           cam.updateProjectionMatrix();
@@ -671,16 +1012,55 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           _quatTrim.setFromEuler(_eulerTrim);
           cam.quaternion.copy(bgView.camQuaternion).multiply(_quatTrim);
           cam.updateMatrixWorld();
+          cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
         }
 
+        const untrimmed = Math.abs(activeCam.yaw) < 0.5 && Math.abs(activeCam.pitch) < 0.5;
         if (depthPrePassMatRef.current && depthPrePassMeshRef.current) {
-          const untrimmed = Math.abs(activeCam.yaw) < 0.5 && Math.abs(activeCam.pitch) < 0.5;
           depthPrePassMatRef.current.uniforms.uZbmp.value = bgView.zbmpDepthTexture;
           depthPrePassMeshRef.current.visible = Boolean(bgView.zbmpDepthTexture) && untrimmed;
+        }
+        if (floorShadowMatRef.current && floorShadowMeshRef.current && cameraRef.current) {
+          const vp = new THREE.Matrix4().multiplyMatrices(
+            cameraRef.current.projectionMatrix,
+            cameraRef.current.matrixWorldInverse
+          );
+          floorShadowMatRef.current.uniforms.uZbmp.value = bgView.zbmpDepthTexture;
+          floorShadowMatRef.current.uniforms.uInvViewProj.value.copy(vp).invert();
+          floorShadowMeshRef.current.visible = Boolean(bgView.zbmpDepthTexture) && untrimmed;
         }
 
         if (shadowPlaneRef.current) {
           shadowPlaneRef.current.position.copy(bgView.stageOrigin);
+          shadowPlaneRef.current.visible = !bgView.zbmpDepthTexture || !untrimmed;
+        }
+
+        // Aim directional shadow frustum cleanly around the active stage origin
+        const shadowCenter = bgView.stageOrigin
+          .clone()
+          .addScaledVector(bgView.camForwardXZ, 8);
+        if (keyLightRef.current) {
+          const kl = keyLightRef.current;
+          kl.target.position.copy(shadowCenter);
+          kl.target.updateMatrixWorld();
+          kl.position
+            .copy(shadowCenter)
+            .addScaledVector(bgView.camRightXZ, 26)
+            .addScaledVector(bgView.camForwardXZ, -20);
+          kl.position.y += 88;
+          kl.updateMatrixWorld();
+          kl.shadow.camera.updateProjectionMatrix();
+        }
+        if (fillLightRef.current) {
+          const fl = fillLightRef.current;
+          fl.target.position.copy(shadowCenter);
+          fl.target.updateMatrixWorld();
+          fl.position
+            .copy(shadowCenter)
+            .addScaledVector(bgView.camRightXZ, -36)
+            .addScaledVector(bgView.camForwardXZ, -18);
+          fl.position.y += 34;
+          fl.updateMatrixWorld();
         }
 
         setLoadingStage(false);
@@ -720,14 +1100,24 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           existing.delete(actor.id);
           rig = undefined;
         }
+        const costumeKey = JSON.stringify({
+          c: actor.costumeCmids || [],
+          m: actor.costumeMtrls || [],
+        });
         if (!rig) {
           const tmpl = await loadTemplate(actor.tmplCno);
           if (cancelled) return;
           rig = instantiateTemplateRig(tmpl, actor.costumeCmids, actor.costumeMtrls);
-          rig.root.userData = { id: actor.id, type: 'actor', tmplCno: actor.tmplCno };
+          rig.root.userData = {
+            id: actor.id,
+            type: 'actor',
+            tmplCno: actor.tmplCno,
+            appliedCostumeKey: costumeKey,
+          };
           group.add(rig.root);
           existing.set(actor.id, rig);
-        } else if (actor.costumeCmids || actor.costumeMtrls) {
+        } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
+          rig.root.userData.appliedCostumeKey = costumeKey;
           applyCostumeToRig(rig, actor.costumeCmids || [], actor.costumeMtrls);
         }
 
@@ -756,7 +1146,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     };
   }, [sceneData.actors]);
 
-  // Load & sync real 3DMM Prop rigs from TMPLS.3CN
+  // Load & sync real 3DMM Prop rigs & their authentic TMPL ACTNs (Bang!, Grow Fast, Fly, Open & Close, etc.)
   useEffect(() => {
     let cancelled = false;
     const group = propsGroupRef.current;
@@ -780,16 +1170,55 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           existing.delete(prop.id);
           rig = undefined;
         }
+        const costumeKey = JSON.stringify({
+          c: prop.costumeCmids || [],
+          m: prop.costumeMtrls || [],
+        });
         if (!rig) {
           const tmpl = await loadTemplate(prop.tmplCno);
           if (cancelled) return;
           rig = instantiateTemplateRig(tmpl, prop.costumeCmids, prop.costumeMtrls);
-          rig.root.userData = { id: prop.id, type: 'prop', tmplCno: prop.tmplCno };
+          rig.root.userData = {
+            id: prop.id,
+            type: 'prop',
+            tmplCno: prop.tmplCno,
+            appliedCostumeKey: costumeKey,
+          };
           group.add(rig.root);
           existing.set(prop.id, rig);
-        } else if (prop.costumeCmids || prop.costumeMtrls) {
+        } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
+          rig.root.userData.appliedCostumeKey = costumeKey;
           applyCostumeToRig(rig, prop.costumeCmids || [], prop.costumeMtrls);
         }
+
+        const tmpl = rig.template;
+        const neededAnids = new Set<number>([prop.anid ?? tmpl.actions[0]?.anid ?? 0]);
+        const matchByName = (name?: string) => {
+          if (!name) return undefined;
+          const norm = name.trim().toLowerCase();
+          return tmpl.actions.find((a) => a.name.trim().toLowerCase() === norm)?.anid;
+        };
+        const m0 = matchByName(prop.action);
+        if (m0 !== undefined) neededAnids.add(m0);
+        if (prop.actionKeyframes) {
+          Object.values(prop.actionKeyframes).forEach((k) => {
+            if (k.anid !== undefined) neededAnids.add(k.anid);
+            const mk = matchByName(k.action);
+            if (mk !== undefined) neededAnids.add(mk);
+          });
+        }
+
+        await Promise.all(
+          Array.from(neededAnids).map(async (anid) => {
+            const key = `${prop.id}:${anid}`;
+            if (!activeActionsRef.current.has(key)) {
+              const act = await loadAction(tmpl, anid);
+              if (!cancelled && act) {
+                activeActionsRef.current.set(key, act);
+              }
+            }
+          })
+        );
       })
     ).then(() => {
       if (!cancelled) setSyncVersion((v) => v + 1);
@@ -800,7 +1229,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     };
   }, [sceneData.props]);
 
-  // Load & sync real 3DMM TDT 3D Text entities using TDFS.3CN + MTRLS.3CN
+  // Load & sync real 3DMM TDT 3D Text entities using TDFS.3CN + MTRLS.3CN (rebuilds cleanly when text/font/shape/mtrl edits)
   useEffect(() => {
     let cancelled = false;
     const container = tdtContainerRef.current;
@@ -817,9 +1246,20 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
     Promise.all(
       tdts.map(async (tdt) => {
-        if (existing.has(tdt.id)) return;
+        const specKey = `${tdt.text}|${tdt.tdfCno}|${tdt.tdts}|${tdt.mtrlCno ?? ''}`;
+        const prev = existing.get(tdt.id);
+        if (prev && prev.userData.specKey === specKey) return;
         const grp = await buildTdtTextGroup(tdt.text, tdt.tdfCno, tdt.tdts, tdt.mtrlCno);
         if (cancelled) return;
+        if (prev) {
+          container.remove(prev);
+        }
+        grp.userData = {
+          id: tdt.id,
+          type: 'tdt' as StageEntityType,
+          specKey,
+          baseColor: grp.userData.baseColor,
+        };
         container.add(grp);
         existing.set(tdt.id, grp);
       })
@@ -832,15 +1272,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     };
   }, [sceneData.tdtTexts]);
 
-  // Apply frame positions, multi-frame ACTN cels, curved interpolation, 3D text, prop actions, and trail dots
-  useEffect(() => {
+  // Evaluate continuous stage pose, blend cels, transforms, 3D text & scrolling 2D text at any subframe
+  applyStageAtFrameRef.current = (evalFrame: number) => {
+    const curScene = sceneDataRef.current;
     const bgView = bgViewRef.current;
 
-    sceneData.actors.forEach((actor) => {
+    curScene.actors.forEach((actor) => {
       const rig = actorRigsRef.current.get(actor.id);
       if (!rig) return;
 
-      const resolvedAct = resolveActorActionAtFrame(actor, currentFrame);
+      const resolvedAct = resolveActorActionAtFrame(actor, evalFrame);
       const parsedAction =
         activeActionsRef.current.get(`${actor.id}:${resolvedAct.anid}`) ||
         rig.template.actionCache.get(resolvedAct.anid) ||
@@ -849,20 +1290,21 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       if (parsedAction) {
         const localCelFrame = resolvedAct.freeze
           ? resolvedAct.celOffset
-          : resolvedAct.celOffset + Math.max(0, currentFrame - resolvedAct.startFrame);
-        applyActionCelToRig(rig, parsedAction, localCelFrame);
+          : resolvedAct.celOffset + Math.max(0, evalFrame - resolvedAct.startFrame);
+        applyActionCelBlendedToRig(rig, parsedAction, localCelFrame);
       }
 
-      const pos = resolveInterpolatedKeyframe(actor.keyframes, currentFrame);
+      const pos = resolveInterpolatedKeyframe(actor.keyframes, evalFrame);
       const sx = pos.scaleX ?? 1;
       const sy = pos.scaleY ?? 1;
       const sz = pos.scaleZ ?? 1;
+      applyRigColorOverride(rig, pos.color);
 
       if (isDraggingRef.current && dragEntityIdRef.current === actor.id) {
         rig.root.visible = true;
-        const { x, y, z, rotY } = dragLiveWorldPosRef.current;
+        const { x, y, z, rotX, rotY, rotZ } = dragLiveWorldPosRef.current;
         rig.root.position.set(x, y, z);
-        rig.root.rotation.y = rotY;
+        rig.root.rotation.set(rotX, rotY, rotZ, 'YXZ');
         rig.root.scale.set(rig.baseScale * sx, rig.baseScale * sy, rig.baseScale * sz);
         if (yellowOutlineBoxRef.current?.visible) {
           yellowOutlineBoxRef.current.position.copy(rig.root.position).add(boxOffsetRef.current);
@@ -871,39 +1313,63 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
 
       rig.root.visible = pos.visible !== false;
-      const worldRotY = storageToWorld(sceneData, bgView, pos, _worldPosTmp);
+      const worldRotY = storageToWorld(curScene, bgView, pos, _worldPosTmp);
       rig.root.position.copy(_worldPosTmp);
-      rig.root.rotation.y = worldRotY;
+      rig.root.rotation.set(pos.rotX || 0, worldRotY, pos.rotZ || 0, 'YXZ');
       rig.root.scale.set(rig.baseScale * sx, rig.baseScale * sy, rig.baseScale * sz);
     });
 
-    sceneData.props.forEach((prop) => {
+    curScene.props.forEach((prop) => {
       const rig = propRigsRef.current.get(prop.id);
       if (!rig) return;
 
-      const resolvedPropAct = resolvePropActionAtFrame(prop, currentFrame);
+      const resolvedPropAct = resolvePropActionAtFrame(prop, evalFrame);
       const localPropFrame = resolvedPropAct.freeze
         ? resolvedPropAct.celOffset
-        : resolvedPropAct.celOffset + Math.max(0, currentFrame - resolvedPropAct.startFrame);
+        : resolvedPropAct.celOffset + Math.max(0, evalFrame - resolvedPropAct.startFrame);
 
-      const pos = resolveInterpolatedKeyframe(prop.keyframes, currentFrame);
+      // Prefer real 3DMM TMPL ACTN (e.g. Explosion "Bang!" / "Grow Fast", Rocket "Fly", Chest "Open and Close")
+      const actNorm = resolvedPropAct.action.trim().toLowerCase();
+      const matchedActionMeta =
+        resolvedPropAct.anid !== undefined
+          ? rig.template.actions.find((a) => a.anid === resolvedPropAct.anid)
+          : rig.template.actions.find((a) => a.name.trim().toLowerCase() === actNorm);
+      const targetAnid = matchedActionMeta?.anid ?? resolvedPropAct.anid ?? 0;
+      const parsedPropActn =
+        activeActionsRef.current.get(`${prop.id}:${targetAnid}`) ||
+        rig.template.actionCache.get(targetAnid) ||
+        rig.template.actionCache.get(0);
+
+      const pos = resolveInterpolatedKeyframe(prop.keyframes, evalFrame);
       const sx = pos.scaleX ?? 1;
       const sy = pos.scaleY ?? 1;
       const sz = pos.scaleZ ?? 1;
+      applyRigColorOverride(rig, pos.color);
+
+      if (parsedPropActn) {
+        applyActionCelBlendedToRig(rig, parsedPropActn, localPropFrame);
+      }
 
       if (isDraggingRef.current && dragEntityIdRef.current === prop.id) {
         rig.root.visible = true;
-        const { x, y, z, rotY } = dragLiveWorldPosRef.current;
+        const { x, y, z, rotX, rotY, rotZ } = dragLiveWorldPosRef.current;
         rig.root.position.set(x, y, z);
-        applyPropActionTransform(
-          rig.root,
-          resolvedPropAct.action,
-          localPropFrame,
-          sceneData.totalFrames,
-          rig.baseScale,
-          rotY || 0
-        );
-        rig.root.scale.set(rig.root.scale.x * sx, rig.root.scale.y * sy, rig.root.scale.z * sz);
+        if (parsedPropActn) {
+          rig.root.rotation.set(rotX, rotY, rotZ, 'YXZ');
+          rig.root.scale.set(rig.baseScale * sx, rig.baseScale * sy, rig.baseScale * sz);
+        } else {
+          applyPropActionTransform(
+            rig.root,
+            resolvedPropAct.action,
+            localPropFrame,
+            curScene.totalFrames,
+            rig.baseScale,
+            rotY,
+            rotX,
+            rotZ
+          );
+          rig.root.scale.set(rig.root.scale.x * sx, rig.root.scale.y * sy, rig.root.scale.z * sz);
+        }
         if (yellowOutlineBoxRef.current?.visible) {
           yellowOutlineBoxRef.current.position.copy(rig.root.position).add(boxOffsetRef.current);
         }
@@ -911,31 +1377,76 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
 
       rig.root.visible = pos.visible !== false;
-      const worldRotY = storageToWorld(sceneData, bgView, pos, _worldPosTmp);
+      const worldRotY = storageToWorld(curScene, bgView, pos, _worldPosTmp);
       rig.root.position.copy(_worldPosTmp);
-      applyPropActionTransform(
-        rig.root,
-        resolvedPropAct.action,
-        localPropFrame,
-        sceneData.totalFrames,
-        rig.baseScale,
-        worldRotY
-      );
-      rig.root.scale.set(rig.root.scale.x * sx, rig.root.scale.y * sy, rig.root.scale.z * sz);
+      if (parsedPropActn) {
+        rig.root.rotation.set(pos.rotX || 0, worldRotY, pos.rotZ || 0, 'YXZ');
+        rig.root.scale.set(rig.baseScale * sx, rig.baseScale * sy, rig.baseScale * sz);
+      } else {
+        applyPropActionTransform(
+          rig.root,
+          resolvedPropAct.action,
+          localPropFrame,
+          curScene.totalFrames,
+          rig.baseScale,
+          worldRotY,
+          pos.rotX || 0,
+          pos.rotZ || 0
+        );
+        rig.root.scale.set(rig.root.scale.x * sx, rig.root.scale.y * sy, rig.root.scale.z * sz);
+      }
     });
 
-    (sceneData.tdtTexts || []).forEach((tdt) => {
+    (curScene.tdtTexts || []).forEach((tdt) => {
       const grp = tdtGroupsRef.current.get(tdt.id);
       if (!grp) return;
-      const pos = resolveInterpolatedKeyframe(tdt.keyframes, currentFrame);
+      const baseHex = (grp.userData.baseColor as string) || '#f59e0b';
+      const pos = resolveInterpolatedKeyframe(tdt.keyframes, evalFrame, baseHex);
+      applyGroupColorOverride(grp, pos.color);
+
+      if (isDraggingRef.current && dragEntityIdRef.current === tdt.id) {
+        grp.visible = true;
+        const { x, y, z, rotX, rotY, rotZ } = dragLiveWorldPosRef.current;
+        grp.position.set(x, y, z);
+        grp.rotation.set(rotX, rotY, rotZ, 'YXZ');
+        grp.scale.set(pos.scaleX ?? 1, pos.scaleY ?? 1, pos.scaleZ ?? 1);
+        if (yellowOutlineBoxRef.current?.visible) {
+          yellowOutlineBoxRef.current.position.copy(grp.position).add(boxOffsetRef.current);
+        }
+        return;
+      }
+
       grp.visible = pos.visible !== false;
-      const worldRotY = storageToWorld(sceneData, bgView, pos, _worldPosTmp);
+      const worldRotY = storageToWorld(curScene, bgView, pos, _worldPosTmp);
       grp.position.copy(_worldPosTmp);
-      grp.rotation.y = worldRotY;
+      grp.rotation.set(pos.rotX || 0, worldRotY, pos.rotZ || 0, 'YXZ');
       grp.scale.set(pos.scaleX ?? 1, pos.scaleY ?? 1, pos.scaleZ ?? 1);
     });
 
-    // Update trail dots around selected actor/prop
+    // Update scrolling 2D text boxes smoothly in-place at full refresh rate
+    (curScene.textBoxes || []).forEach((tb) => {
+      if (!tb.isScrolling) return;
+      const el = textBoxInnerRefs.current.get(tb.id);
+      if (!el) return;
+      const spanFrames = Math.max(1, tb.endFrame - tb.startFrame);
+      const scrollProgress = Math.max(0, Math.min(1, (evalFrame - tb.startFrame) / spanFrames));
+      el.style.transform = `translateY(${(0.18 - scrollProgress * 0.95) * 100}%)`;
+    });
+  };
+
+  // Sync stage on discrete/edit changes while honoring active live rAF playhead during playback
+  useEffect(() => {
+    const live = livePlayheadPropRef.current?.current;
+    const evalFrame =
+      isPlaying && live && live.sceneIndex === sceneIndex
+        ? live.renderFrame
+        : (renderFrame ?? currentFrame);
+    applyStageAtFrameRef.current(evalFrame);
+  }, [currentFrame, renderFrame, isPlaying, sceneIndex, sceneData, syncVersion]);
+
+  // Update trail dots around selected actor/prop/3D text only on integer frame / selection / keyframe changes
+  useEffect(() => {
+    const bgView = bgViewRef.current;
     const trailGroup = trailDotsGroupRef.current;
     while (trailGroup.children.length > 0) {
       trailGroup.remove(trailGroup.children[0]);
@@ -949,7 +1460,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     ) {
       const selActor = sceneData.actors.find((a) => a.id === selectedEntityId);
       const selProp = sceneData.props.find((p) => p.id === selectedEntityId);
-      const kfs = selActor?.keyframes || selProp?.keyframes;
+      const selTdt = (sceneData.tdtTexts || []).find((t) => t.id === selectedEntityId);
+      const kfs = selActor?.keyframes || selProp?.keyframes || selTdt?.keyframes;
       if (kfs) {
         const sortedEntries = Object.entries(kfs).sort(([a], [b]) => Number(a) - Number(b));
         const step = sortedEntries.length > 45 ? 2 : 1;
@@ -996,10 +1508,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     const pickables: THREE.Object3D[] = [];
     actorRigsRef.current.forEach((rig) => pickables.push(rig.root));
     propRigsRef.current.forEach((rig) => pickables.push(rig.root));
+    tdtGroupsRef.current.forEach((grp) => pickables.push(grp));
 
     const intersects = raycasterRef.current.intersectObjects(pickables, true);
     let clickedId: string | null = null;
-    let clickedType: 'actor' | 'prop' | null = null;
+    let clickedType: StageEntityType | null = null;
 
     if (intersects.length > 0) {
       let top: THREE.Object3D | null = intersects[0].object;
@@ -1008,7 +1521,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
       if (top?.userData?.id) {
         clickedId = top.userData.id;
-        clickedType = top.userData.type as 'actor' | 'prop';
+        clickedType = top.userData.type as StageEntityType;
         onSelectEntity(clickedId, clickedType);
         selectedEntityIdRef.current = clickedId;
       }
@@ -1016,10 +1529,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
     if (!clickedId) {
       let closestId: string | null = null;
-      let closestType: 'actor' | 'prop' | null = null;
+      let closestType: StageEntityType | null = null;
       let bestPx = 56;
 
-      const checkTouch = (id: string, type: 'actor' | 'prop', root: THREE.Object3D, approxH: number) => {
+      const checkTouch = (id: string, type: StageEntityType, root: THREE.Object3D, approxH: number) => {
         _screenPtA.set(root.position.x, root.position.y + 0.5, root.position.z).project(camera);
         _screenPtB.set(root.position.x, root.position.y + approxH, root.position.z).project(camera);
         if (_screenPtA.z > 1 || _screenPtB.z > 1) return;
@@ -1037,6 +1550,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
       actorRigsRef.current.forEach((rig, id) => checkTouch(id, 'actor', rig.root, 8.0));
       propRigsRef.current.forEach((rig, id) => checkTouch(id, 'prop', rig.root, 5.0));
+      tdtGroupsRef.current.forEach((grp, id) => checkTouch(id, 'tdt', grp, 4.0));
 
       if (closestId && closestType) {
         clickedId = closestId;
@@ -1050,11 +1564,17 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     if (!targetId) return;
 
     const isActor = sceneDataRef.current.actors.some((a) => a.id === targetId);
-    const targetType = isActor ? 'actor' : 'prop';
-    const targetRig = actorRigsRef.current.get(targetId) || propRigsRef.current.get(targetId);
-    if (!targetRig) return;
+    const isProp = sceneDataRef.current.props.some((p) => p.id === targetId);
+    const isTdt = (sceneDataRef.current.tdtTexts || []).some((t) => t.id === targetId);
+    if (!isActor && !isProp && !isTdt) return;
 
-    const targetObj = targetRig.root;
+    const targetType: StageEntityType = isActor ? 'actor' : isProp ? 'prop' : 'tdt';
+    const targetObj: THREE.Object3D | undefined =
+      actorRigsRef.current.get(targetId)?.root ||
+      propRigsRef.current.get(targetId)?.root ||
+      tdtGroupsRef.current.get(targetId);
+    if (!targetObj) return;
+
     stopRecordingTimer();
     isDraggingRef.current = true;
     hasStartedDragMoveRef.current = false;
@@ -1067,7 +1587,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       x: targetObj.position.x,
       y: targetObj.position.y,
       z: targetObj.position.z,
-      rotY: targetType === 'actor' ? targetObj.rotation.y : 0,
+      rotX: targetObj.rotation.x,
+      rotY: targetObj.rotation.y,
+      rotZ: targetObj.rotation.z,
     };
     const startStorage = worldToStorage(
       sceneDataRef.current,
@@ -1075,12 +1597,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       worldStart.x,
       worldStart.y,
       worldStart.z,
-      worldStart.rotY
+      worldStart.rotY,
+      worldStart.rotX,
+      worldStart.rotZ
     );
 
     dragStartWorldPosRef.current = { ...worldStart };
     dragLiveWorldPosRef.current = { ...worldStart };
-    prevStoragePosRef.current = { x: startStorage.x, z: startStorage.z };
+    prevStoragePosRef.current = { x: startStorage.x, y: startStorage.y, z: startStorage.z };
     lastHeadingPosRef.current = { x: worldStart.x, z: worldStart.z };
     recordingFrameRef.current = currentFrameRef.current;
 
@@ -1103,7 +1627,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     }
   };
 
-  // Pointer Move: unrestricted dragging along camera screen axes + 6 FPS movement recording
+  // Pointer Move: Ground XZ drag OR Up & Down XY drag OR 3D Rotate (X/Y/Z) + 6 FPS recording
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!isDraggingRef.current || !dragEntityIdRef.current) return;
     e.preventDefault();
@@ -1131,9 +1655,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
     const entityId = dragEntityIdRef.current;
     const type = dragEntityTypeRef.current || 'actor';
-    const rig = actorRigsRef.current.get(entityId) || propRigsRef.current.get(entityId);
-    if (!rig) return;
-    const targetObj = rig.root;
+    const targetObj: THREE.Object3D | undefined =
+      actorRigsRef.current.get(entityId)?.root ||
+      propRigsRef.current.get(entityId)?.root ||
+      tdtGroupsRef.current.get(entityId);
+    if (!targetObj) return;
 
     camera.updateMatrixWorld();
     _camRightXZ.setFromMatrixColumn(camera.matrixWorld, 0);
@@ -1156,17 +1682,45 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       )
     );
     const fovRad = THREE.MathUtils.degToRad(camera.fov);
-    const visWidth = 2 * dist * Math.tan(fovRad * 0.5) * camera.aspect;
+    const visHeight = 2 * dist * Math.tan(fovRad * 0.5);
+    const visWidth = visHeight * camera.aspect;
 
-    const moveRight = (ddxPx / rect.width) * visWidth * 0.72;
-    const moveFwd = (-ddyPx / rect.height) * Math.max(24, dist * 0.9);
-
-    const targetX = prevWorld.x + _camRightXZ.x * moveRight + _camForwardXZ.x * moveFwd;
-    const targetZ = prevWorld.z + _camRightXZ.z * moveRight + _camForwardXZ.z * moveFwd;
-
-    // Compute facing directly in direction of motion (local +Z aligns with face)
+    let targetX = prevWorld.x;
+    let targetY = prevWorld.y;
+    let targetZ = prevWorld.z;
+    let rotX = prevWorld.rotX;
     let rotY = prevWorld.rotY;
-    if (type === 'actor' && isRecordingMovementRef.current) {
+    let rotZ = prevWorld.rotZ;
+
+    if (rotateModeRef.current) {
+      // 3D Rotate Mode: horizontal rotates Y (turn Left/Right), vertical tilts X (pitch), Shift+drag rolls Z
+      if (e.shiftKey) {
+        rotZ = prevWorld.rotZ - ddxPx * 0.018;
+      } else {
+        rotY = prevWorld.rotY + ddxPx * 0.018;
+        rotX = prevWorld.rotX + ddyPx * 0.018;
+      }
+    } else if (moveUpDownModeRef.current) {
+      // Up & Down Mode: ONLY moves Up/Down (Y) + Left/Right (camRightXZ), NEVER Forward/Backwards!
+      const moveRight = (ddxPx / rect.width) * visWidth * 0.88;
+      const moveUp = (-ddyPx / rect.height) * visHeight * 0.88;
+      targetX = prevWorld.x + _camRightXZ.x * moveRight;
+      targetZ = prevWorld.z + _camRightXZ.z * moveRight;
+      targetY = prevWorld.y + moveUp;
+    } else {
+      const moveRight = (ddxPx / rect.width) * visWidth * 0.72;
+      const moveFwd = (-ddyPx / rect.height) * Math.max(24, dist * 0.9);
+      targetX = prevWorld.x + _camRightXZ.x * moveRight + _camForwardXZ.x * moveFwd;
+      targetZ = prevWorld.z + _camRightXZ.z * moveRight + _camForwardXZ.z * moveFwd;
+    }
+
+    // Auto-orient heading during recorded ground movement (not in Rotate or Up/Down mode)
+    if (
+      type === 'actor' &&
+      isRecordingMovementRef.current &&
+      !moveUpDownModeRef.current &&
+      !rotateModeRef.current
+    ) {
       const hdx = targetX - lastHeadingPosRef.current.x;
       const hdz = targetZ - lastHeadingPosRef.current.z;
       if (Math.hypot(hdx, hdz) > 0.22) {
@@ -1176,10 +1730,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
     }
 
-    const nextWorld = { x: targetX, y: prevWorld.y, z: targetZ, rotY };
+    const nextWorld = { x: targetX, y: targetY, z: targetZ, rotX, rotY, rotZ };
     dragLiveWorldPosRef.current = nextWorld;
-    targetObj.position.set(targetX, prevWorld.y, targetZ);
-    if (type === 'actor') targetObj.rotation.y = rotY;
+    targetObj.position.set(targetX, targetY, targetZ);
+    targetObj.rotation.set(rotX, rotY, rotZ, 'YXZ');
 
     if (yellowOutlineBoxRef.current?.visible) {
       yellowOutlineBoxRef.current.position.copy(targetObj.position).add(boxOffsetRef.current);
@@ -1189,13 +1743,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       sceneDataRef.current,
       bgViewRef.current,
       targetX,
-      prevWorld.y,
+      targetY,
       targetZ,
-      rotY
+      rotY,
+      rotX,
+      rotZ
     );
     const stepDeltaX = nextStorage.x - prevStoragePosRef.current.x;
+    const stepDeltaY = nextStorage.y - prevStoragePosRef.current.y;
     const stepDeltaZ = nextStorage.z - prevStoragePosRef.current.z;
-    prevStoragePosRef.current = { x: nextStorage.x, z: nextStorage.z };
+    prevStoragePosRef.current = { x: nextStorage.x, y: nextStorage.y, z: nextStorage.z };
 
     if (!hasStartedDragMoveRef.current) {
       hasStartedDragMoveRef.current = true;
@@ -1209,7 +1766,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           dragStartWorldPosRef.current.x,
           dragStartWorldPosRef.current.y,
           dragStartWorldPosRef.current.z,
-          dragStartWorldPosRef.current.rotY
+          dragStartWorldPosRef.current.rotY,
+          dragStartWorldPosRef.current.rotX,
+          dragStartWorldPosRef.current.rotZ
         );
         onBeginRecordingRef.current(entityId, type, startFrame, startStorage);
 
@@ -1238,7 +1797,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             curLive.x,
             curLive.y,
             curLive.z,
-            curLive.rotY
+            curLive.rotY,
+            curLive.rotX,
+            curLive.rotZ
           );
           onRecordMovementStepRef.current(
             dragEntityIdRef.current,
@@ -1247,7 +1808,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             liveStorage,
             true
           );
-        }, 1000 / 6); // Authentic 6 FPS motion recording
+        }, 1000 / 6); // Authentic 6 FPS motion/rotation recording
       } else {
         onMoveEntityAtFrameRef.current(
           entityId,
@@ -1255,6 +1816,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           currentFrameRef.current,
           nextStorage,
           stepDeltaX,
+          stepDeltaY,
           stepDeltaZ
         );
       }
@@ -1276,6 +1838,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         currentFrameRef.current,
         nextStorage,
         stepDeltaX,
+        stepDeltaY,
         stepDeltaZ
       );
     }
@@ -1297,7 +1860,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         curLive.x,
         curLive.y,
         curLive.z,
-        curLive.rotY
+        curLive.rotY,
+        curLive.rotX,
+        curLive.rotZ
       );
       onRecordMovementStepRef.current(
         dragEntityIdRef.current,
@@ -1324,16 +1889,24 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     }
   };
 
+  const scrollEvalFrame = renderFrame ?? currentFrame;
   const activeTextBoxes = (sceneData.textBoxes || []).filter(
-    (tb) => currentFrame >= tb.startFrame && currentFrame <= tb.endFrame
+    (tb) => scrollEvalFrame >= tb.startFrame && scrollEvalFrame <= tb.endFrame
   );
 
   return (
-    <div className="relative w-full h-full flex items-center justify-center studio-stage-well overflow-hidden select-none touch-none p-2">
-      {/* Authentic 544x306 3DMM Stage Frame */}
+    <div
+      ref={wellRef}
+      className="relative w-full h-full flex items-center justify-center studio-stage-well overflow-hidden select-none touch-none p-2"
+    >
+      {/* Authentic 544x306 3DMM Stage Frame (exact locked aspect ratio so MBMP/ZBMP/WebGL match on every angle) */}
       <div
-        className="relative w-full max-h-full aspect-[544/306] bg-black studio-bevel-frame overflow-hidden"
-        style={{ containerType: 'inline-size' }}
+        className="relative bg-black studio-bevel-frame overflow-hidden shrink-0"
+        style={{
+          width: `${stageBoxSize.w}px`,
+          height: `${stageBoxSize.h}px`,
+          containerType: 'inline-size',
+        }}
       >
         {/* Real Pre-rendered 544x306 MBMP Stage Backdrop */}
         {backdropUrl && (
@@ -1345,7 +1918,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           />
         )}
 
-        {/* Smooth-Shaded WebGL Layer + ZBMP Depth Occlusion + TDT 3D Text */}
+        {/* Smooth-Shaded WebGL Layer + ZBMP Depth Occlusion + ZBMP Floor Shadow + TDT 3D Text */}
         <div
           ref={mountRef}
           onPointerDown={handlePointerDown}
@@ -1353,7 +1926,13 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
           className={`absolute inset-0 w-full h-full touch-none ${
-            isRecordingMovement ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'
+            isRecordingMovement
+              ? 'cursor-crosshair'
+              : rotateMode
+                ? 'cursor-ew-resize'
+                : moveUpDownMode
+                  ? 'cursor-ns-resize'
+                  : 'cursor-grab active:cursor-grabbing'
           }`}
         />
 
@@ -1364,7 +1943,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           const widthPct = Math.max(1, Math.min(100 - leftPct, ((tb.right - tb.left) / 544) * 100));
           const heightPct = Math.max(1, Math.min(100 - topPct, ((tb.bottom - tb.top) / 306) * 100));
           const spanFrames = Math.max(1, tb.endFrame - tb.startFrame);
-          const scrollProgress = Math.max(0, Math.min(1, (currentFrame - tb.startFrame) / spanFrames));
+          const scrollProgress = Math.max(0, Math.min(1, (scrollEvalFrame - tb.startFrame) / spanFrames));
+          const fontSizeCqw = (((tb.fontSize ?? 14) * 1.18) / 544) * 100;
+          const textColor = tb.color || '#f9f9f9';
 
           return (
             <div
@@ -1375,15 +1956,25 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 top: `${topPct}%`,
                 width: `${widthPct}%`,
                 height: `${heightPct}%`,
-                fontFamily: `"${tb.fontName}", "Comic Sans MS", cursive, sans-serif`,
-                fontSize: '3.2cqw',
-                lineHeight: 1.28,
-                color: '#ffffff',
-                textShadow: '1px 1px 2px rgba(0,0,0,0.95), -1px -1px 1px rgba(0,0,0,0.75)',
+                backgroundColor: tb.bgColor || 'transparent',
+                padding: tb.bgColor ? '0.6cqw 1cqw' : undefined,
+                fontFamily: `"${tb.fontName || 'Comic Sans MS'}", "Comic Sans MS", cursive, sans-serif`,
+                fontSize: `${fontSizeCqw.toFixed(2)}cqw`,
+                fontWeight: tb.bold ? 700 : 400,
+                fontStyle: tb.italic ? 'italic' : 'normal',
+                lineHeight: 1.24,
+                color: textColor,
+                textShadow: tb.bgColor
+                  ? undefined
+                  : '1px 1px 2px rgba(0,0,0,0.92), -1px -1px 1px rgba(0,0,0,0.6)',
               }}
             >
               <div
-                className="whitespace-pre-wrap break-words font-semibold"
+                ref={(el) => {
+                  if (el) textBoxInnerRefs.current.set(tb.id, el);
+                  else textBoxInnerRefs.current.delete(tb.id);
+                }}
+                className="whitespace-pre-wrap break-words"
                 style={
                   tb.isScrolling
                     ? { transform: `translateY(${(0.18 - scrollProgress * 0.95) * 100}%)` }
@@ -1402,21 +1993,71 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           </div>
         )}
 
-        {isRecordingMovement && (
-          <div className="absolute top-2.5 left-1/2 -translate-x-1/2 bg-amber-400 text-slate-950 font-bold px-3 py-1 border-2 border-black shadow-lg flex items-center gap-2 pointer-events-none text-xs">
-            <img src="/3dmm/bmp/2RECDS.BMP" alt="" className="w-4 h-4 image-rendering-pixelated" />
-            <span>RECORDING (6 FPS): Drag entity to move</span>
+        {webglError && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/75 p-4 text-center text-xs text-rose-200 pointer-events-none">
+            <div className="studio-panel px-3 py-2 max-w-sm">
+              WebGL unavailable: {webglError}
+            </div>
           </div>
         )}
 
-        {/* Stage Info Badges */}
-        <div className="absolute top-1.5 left-2 right-2 flex justify-between items-center pointer-events-none text-[11px] font-bold">
-          <span className="bg-[#1b0e36]/85 text-amber-200 px-2 py-0.5 border border-[#8e63d6]">
+        {isRecordingMovement && (
+          <div className="absolute top-8 left-1/2 -translate-x-1/2 bg-amber-400 text-slate-950 font-bold px-3 py-1 border-2 border-black shadow-lg flex items-center gap-2 pointer-events-none text-xs">
+            <img src={assetUrl('3dmm/bmp/2RECDS.BMP')} alt="" className="w-4 h-4 image-rendering-pixelated" />
+            <span>RECORDING (6 FPS): Drag entity to {rotateMode ? 'rotate' : 'move'}</span>
+          </div>
+        )}
+
+        {/* Stage Info Badges, Rotate 3D & Up/Down Drag Toggles */}
+        <div className="absolute top-1.5 left-2 right-2 flex justify-between items-center pointer-events-none text-[11px] font-bold gap-1.5">
+          <span className="bg-[#1b0e36]/85 text-amber-200 px-2 py-0.5 border border-[#8e63d6] truncate">
             Scene {sceneIndex + 1}/{totalScenes}: {sceneData.sceneName} (View {activeCam.icam + 1})
           </span>
-          <span className="bg-[#1b0e36]/85 text-cyan-200 px-2 py-0.5 border border-[#8e63d6]">
-            Frame {currentFrame} / {sceneData.totalFrames} @ 6 FPS
-          </span>
+          <div className="flex items-center gap-1 pointer-events-auto shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                void sound3DMM.playUiWav('DROPDN.WAV');
+                onToggleRotateMode();
+              }}
+              title="Rotate Mode: Drag Left/Right turns Y, Up/Down tilts X, Shift+Drag rolls Z"
+              className={`px-2 py-0.5 border text-[11px] font-bold flex items-center gap-1 shadow ${
+                rotateMode
+                  ? 'bg-emerald-400 text-slate-950 border-white'
+                  : 'bg-[#1b0e36]/90 text-purple-100 border-[#8e63d6] hover:brightness-125'
+              }`}
+            >
+              <img
+                src={assetUrl('3dmm/bmp/2ROT.BMP')}
+                alt=""
+                className="h-3.5 w-auto object-contain image-rendering-pixelated"
+              />
+              <span>{rotateMode ? 'Rotate 3D: ON' : 'Rotate'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void sound3DMM.playUiWav('DROPDN.WAV');
+                onToggleMoveUpDown();
+              }}
+              title="Toggle Up & Down drag mode (also use Up/Down arrow keys anytime)"
+              className={`px-2 py-0.5 border text-[11px] font-bold flex items-center gap-1 shadow ${
+                moveUpDownMode
+                  ? 'bg-amber-400 text-slate-950 border-white'
+                  : 'bg-[#1b0e36]/90 text-cyan-200 border-[#8e63d6] hover:brightness-125'
+              }`}
+            >
+              <img
+                src={assetUrl(moveUpDownMode ? '3dmm/bmp/2XY.BMP' : '3dmm/bmp/2XZ.BMP')}
+                alt=""
+                className="h-3.5 w-auto object-contain image-rendering-pixelated"
+              />
+              <span>{moveUpDownMode ? 'Up & Down: ON (L/R + U/D)' : 'Up & Down: OFF'}</span>
+            </button>
+            <span className="bg-[#1b0e36]/85 text-cyan-200 px-2 py-0.5 border border-[#8e63d6] pointer-events-none">
+              f{currentFrame} / {sceneData.totalFrames} (24 FPS)
+            </span>
+          </div>
         </div>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { parseGL } from './kauaiCodec';
+import { assetUrl } from '../utils/assetUrl';
 
 /**
  * 256-entry RGB palette [r0, g0, b0, r1, g1, b1, ...].
@@ -13,7 +14,7 @@ let basePalettePromise: Promise<Palette256> | null = null;
  */
 export function loadBasePalette(): Promise<Palette256> {
   if (basePalettePromise) return basePalettePromise;
-  basePalettePromise = fetch('/3dmm/bmp/SOCPAL.BMP').then(async (res) => {
+  basePalettePromise = fetch(assetUrl('3dmm/bmp/SOCPAL.BMP')).then(async (res) => {
     if (!res.ok) throw new Error(`Failed to load SOCPAL.BMP (${res.status})`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -144,9 +145,8 @@ export function mbmpToDataUrl(mbmpBytes: Uint8Array, palette: Palette256): strin
 
 /**
  * Decodes a BRender TMAP (texture map) chunk into a Three.js DataTexture.
- * TMAPF layout (18 bytes): bo(0), osk(2), cbRow(4), type(6), grftmap(7),
- *   xpLeft(8), ypTop(10), dxp(12), dyp(14), xpOrigin(16), ypOrigin(17)? actually 2x i16 -> 16,18?
- * Checked in TMAP.H: cbRow@4(i16), type@6(u8), grftmap@7(u8), xpLeft@8, ypTop@10, dxp@12, dyp@14, xpOrigin@16, ypOrigin@18 -> 20 bytes? Wait: TMAPF check:
+ * In 3DMM TMPLS.3CN, TMAP row 0 corresponds directly to UV v=0 (bottom) and
+ * row height-1 to UV v=1 (top), matching BMDL vertex UVs and TXXF transforms.
  */
 export function decodeTmapToTexture(tmapBytes: Uint8Array, palette: Palette256): THREE.DataTexture | null {
   if (tmapBytes.length < 20) return null;
@@ -157,7 +157,6 @@ export function decodeTmapToTexture(tmapBytes: Uint8Array, palette: Palette256):
   const height = dv.getInt16(14, true);
   if (width <= 0 || height <= 0 || width > 2048 || height > 2048) return null;
 
-  // TMAPF is 20 bytes (short bo, osk, cbRow, byte type, grftmap, short xpLeft, ypTop, dxp, dyp, xpOrigin, ypOrigin)
   const pixStart = tmapBytes.length - height * cbRow;
   const dataStart = pixStart >= 18 ? pixStart : 20;
   const rgba = new Uint8Array(width * height * 4);
@@ -220,6 +219,63 @@ export function decodeTmapToTexture(tmapBytes: Uint8Array, palette: Palette256):
   tex.generateMipmaps = false;
   tex.needsUpdate = true;
   return tex;
+}
+
+/**
+ * Extracts the dominant uniform skin tone hex from an actor's 8-bit indexed face/skin TMAP
+ * (sampling lower chin/cheek & side border pixels, skipping background/black/eye pixels)
+ * so hands and non-face body parts never accidentally display eyes/mouth textures.
+ */
+export function extractSkinHexFromTmap(tmapBytes: Uint8Array, palette: Palette256): string | null {
+  if (tmapBytes.length < 20) return null;
+  const dv = new DataView(tmapBytes.buffer, tmapBytes.byteOffset, tmapBytes.byteLength);
+  const cbRow = dv.getInt16(4, true);
+  const type = tmapBytes[6];
+  const width = dv.getInt16(12, true);
+  const height = dv.getInt16(14, true);
+  if (type !== 3 || width <= 8 || height <= 8) return null;
+
+  const pixStart = tmapBytes.length - height * cbRow;
+  const dataStart = pixStart >= 18 ? pixStart : 20;
+
+  const buckets = new Map<string, { count: number; rSum: number; gSum: number; bSum: number }>();
+  const yStart = Math.floor(height * 0.65);
+
+  for (let y = yStart; y < height; y++) {
+    const rowOff = dataStart + y * cbRow;
+    for (let x = 0; x < width; x += 2) {
+      const idx = tmapBytes[rowOff + x] ?? 0;
+      if (idx === 0) continue;
+      const r = palette[idx * 3 + 0];
+      const g = palette[idx * 3 + 1];
+      const b = palette[idx * 3 + 2];
+      // Skip near-black hair/outlines and near-white eye whites
+      if (r + g + b < 45 || (r > 240 && g > 240 && b > 240)) continue;
+      const key = `${r >> 4}_${g >> 4}_${b >> 4}`;
+      const entry = buckets.get(key);
+      if (entry) {
+        entry.count++;
+        entry.rSum += r;
+        entry.gSum += g;
+        entry.bSum += b;
+      } else {
+        buckets.set(key, { count: 1, rSum: r, gSum: g, bSum: b });
+      }
+    }
+  }
+
+  let best: { count: number; rSum: number; gSum: number; bSum: number } | null = null;
+  for (const b of buckets.values()) {
+    if (!best || b.count > best.count) best = b;
+  }
+  if (!best || best.count === 0) return null;
+  const rr = Math.round(best.rSum / best.count);
+  const gg = Math.round(best.gSum / best.count);
+  const bb = Math.round(best.bSum / best.count);
+  return (
+    '#' +
+    [rr, gg, bb].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('')
+  );
 }
 
 /**

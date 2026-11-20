@@ -3,6 +3,7 @@ import { CameraAngle, CameraCutEvent } from '../types/movie';
 import { CatalogCameraView } from '../services/threeDmmEngine';
 import { sound3DMM } from '../services/soundLibrary';
 import { RotateCcw, Trash2 } from 'lucide-react';
+import { assetUrl } from '../utils/assetUrl';
 
 interface CameraAngleBarProps {
   currentFrame: number;
@@ -32,7 +33,7 @@ export const CameraAngleBar: React.FC<CameraAngleBarProps> = ({
     <div className="bg-[#210f44] border-b-2 border-[#120624] px-2.5 py-1 flex items-center gap-2 text-xs text-slate-200 select-none overflow-x-auto">
       <div className="flex items-center gap-1.5 font-bold text-amber-300 studio-well px-2 py-0.5 shrink-0">
         <img
-          src="/3dmm/bmp/1VIEW.BMP"
+          src={assetUrl('3dmm/bmp/1VIEW.BMP')}
           alt="3DMM Camera View"
           className="h-5 w-auto object-contain inline-block image-rendering-pixelated"
         />

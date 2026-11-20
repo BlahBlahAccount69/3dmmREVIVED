@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { CameraCutEvent, ImportedAudioCue } from '../types/movie';
 import { sound3DMM } from '../services/soundLibrary';
+import { assetUrl } from '../utils/assetUrl';
 
 interface TimelineBarProps {
   currentFrame: number;
@@ -60,7 +61,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
             className="studio-btn px-1.5 py-1 flex items-center"
           >
             <img
-              src="/3dmm/bmp/B5CELBK.BMP"
+              src={assetUrl('3dmm/bmp/B5CELBK.BMP')}
               alt="Prev Frame"
               className="h-3.5 w-auto object-contain image-rendering-pixelated"
             />
@@ -99,7 +100,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
             className="studio-btn px-1.5 py-1 flex items-center"
           >
             <img
-              src="/3dmm/bmp/B5CELFW.BMP"
+              src={assetUrl('3dmm/bmp/B5CELFW.BMP')}
               alt="Next Frame"
               className="h-3.5 w-auto object-contain image-rendering-pixelated"
             />
@@ -115,7 +116,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
           {currentAudioCue ? (
             <div className="bg-[#3b206f] border-2 border-amber-400 px-2 py-0.5 flex items-center gap-1.5 text-[11px]">
               {currentAudioCue.isMidi ? (
-                <img src="/3dmm/bmp/3NOTE.BMP" alt="" className="h-4 w-auto object-contain image-rendering-pixelated" />
+                <img src={assetUrl('3dmm/bmp/3NOTE.BMP')} alt="" className="h-4 w-auto object-contain image-rendering-pixelated" />
               ) : (
                 <Volume2 size={12} className="text-amber-300" />
               )}
@@ -149,7 +150,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
               className="studio-btn px-2.5 py-0.5 font-bold text-[11px] flex items-center gap-1.5 text-amber-200"
             >
               <img
-                src="/3dmm/bmp/3NOTE.BMP"
+                src={assetUrl('3dmm/bmp/3NOTE.BMP')}
                 alt=""
                 className="h-4 w-auto object-contain image-rendering-pixelated"
               />

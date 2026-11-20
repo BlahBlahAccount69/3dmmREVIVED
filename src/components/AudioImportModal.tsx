@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ImportedAudioCue } from '../types/movie';
 import { CatalogSoundItem, sound3DMM } from '../services/soundLibrary';
 import { Music, Play, Square, Upload, Volume2 } from 'lucide-react';
+import { assetUrl } from '../utils/assetUrl';
 
 interface AudioImportModalProps {
   currentFrame: number;
@@ -90,7 +91,7 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
         <div className="bg-[#43217c] border-b-2 border-[#120624] px-3 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2 font-bold text-amber-300 text-sm">
             <img
-              src="/3dmm/bmp/3NOTE.BMP"
+              src={assetUrl('3dmm/bmp/3NOTE.BMP')}
               alt=""
               className="h-5 w-auto object-contain image-rendering-pixelated"
             />
@@ -182,7 +183,7 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button
-                        onClick={() => void sound3DMM.playCatalogMsnd(item.msndCno, false)}
+                        onClick={() => void sound3DMM.playCatalogMsnd(item.msndCno, false, true)}
                         className="studio-btn px-2 py-0.5 text-[11px] flex items-center gap-1"
                         title="Preview"
                       >
@@ -209,7 +210,7 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
           ) : (
             <div className="flex flex-col gap-3 py-2">
               <div className="studio-well p-2.5 text-purple-200 leading-relaxed">
-                Import any audio clip (WAV/MP3/OGG). It will be bitcrushed to authentic 22kHz 8-bit PCM WAV and embedded directly inside your exported <code className="text-amber-300">.3mm.json</code>!
+                Import any audio clip (WAV/MP3/OGG). It will be bitcrushed to authentic 22kHz 8-bit PCM WAV and embedded directly inside your saved <code className="text-amber-300">.3mm</code> movie!
               </div>
               <label className="studio-btn cursor-pointer p-4 flex flex-col items-center gap-2 text-center border-dashed border-2 border-amber-400">
                 <Upload size={22} className="text-amber-300" />

@@ -1,4 +1,5 @@
 import { WorkletSynthesizer } from 'spessasynth_lib';
+import { assetUrl } from '../utils/assetUrl';
 
 /**
  * Microsoft GS Wavetable SoundFont MIDI Synthesizer using spessasynth_lib AudioWorklet
@@ -182,12 +183,43 @@ export function parseSmfToEvents(bytes: Uint8Array): { events: MidiEvent[]; dura
   return { events, durationMs: timeMs };
 }
 
+export function hashMidiBytes(bytes: Uint8Array): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    h1 ^= b;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= b + (i & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `${bytes.length}:${(h1 >>> 0).toString(16)}:${(h2 >>> 0).toString(16)}`;
+}
+
+export interface MidiPlayOptions {
+  loop?: boolean;
+  audioCtx?: AudioContext;
+  trackKey?: string;
+  forceRestart?: boolean;
+}
+
 class GsWavetableMidiPlayer {
   private ctx: AudioContext | null = null;
   private synth: WorkletSynthesizer | null = null;
   private synthInitPromise: Promise<WorkletSynthesizer | null> | null = null;
   private schedulerId: number | null = null;
   private playbackToken = 0;
+  private activeTrackKey: string | null = null;
+  private isActivelyPlaying = false;
+  private activeLoop = false;
+
+  public getActiveTrackKey(): string | null {
+    return this.isActivelyPlaying ? this.activeTrackKey : null;
+  }
+
+  public isPlayingTrack(trackKey?: string | null): boolean {
+    return Boolean(trackKey && this.isActivelyPlaying && this.activeTrackKey === trackKey);
+  }
 
   private ensureAudioContext(externalCtx?: AudioContext): AudioContext {
     if (externalCtx && this.ctx !== externalCtx) {
@@ -214,12 +246,12 @@ class GsWavetableMidiPlayer {
 
     this.synthInitPromise = (async () => {
       try {
-        await ctx.audioWorklet.addModule('/3dmm/soundfont/spessasynth_processor.min.js');
+        await ctx.audioWorklet.addModule(assetUrl('3dmm/soundfont/spessasynth_processor.min.js'));
         const synth = new WorkletSynthesizer(ctx);
         synth.connect(ctx.destination);
         await synth.isReady;
 
-        const sfRes = await fetch('/3dmm/soundfont/MS_GS_Wavetable.sf2');
+        const sfRes = await fetch(assetUrl('3dmm/soundfont/MS_GS_Wavetable.sf2'));
         if (!sfRes.ok) throw new Error(`Failed loading MS_GS_Wavetable.sf2 (${sfRes.status})`);
         const sfBuf = await sfRes.arrayBuffer();
         await synth.soundBankManager.addSoundBank(sfBuf, 'ms_gs_wavetable');
@@ -238,6 +270,9 @@ class GsWavetableMidiPlayer {
 
   public stop() {
     this.playbackToken++;
+    this.isActivelyPlaying = false;
+    this.activeTrackKey = null;
+    this.activeLoop = false;
     if (this.schedulerId !== null) {
       window.clearInterval(this.schedulerId);
       this.schedulerId = null;
@@ -278,17 +313,33 @@ class GsWavetableMidiPlayer {
   public async playEvents(
     events: MidiEvent[],
     durationMs: number,
-    options?: { loop?: boolean; audioCtx?: AudioContext }
+    options?: MidiPlayOptions
   ) {
+    if (!options?.forceRestart && options?.trackKey && this.isPlayingTrack(options.trackKey)) {
+      if (options.loop !== undefined) {
+        this.activeLoop = Boolean(options.loop);
+      }
+      return;
+    }
+
     this.stop();
     if (events.length === 0) return;
 
+    this.activeTrackKey = options?.trackKey ?? null;
+    this.activeLoop = Boolean(options?.loop);
+    this.isActivelyPlaying = true;
+
     const token = this.playbackToken;
     const synth = await this.ensureSynth(options?.audioCtx);
-    if (!synth || token !== this.playbackToken || !this.ctx) return;
+    if (!synth || token !== this.playbackToken || !this.ctx) {
+      if (token === this.playbackToken) {
+        this.isActivelyPlaying = false;
+        this.activeTrackKey = null;
+      }
+      return;
+    }
 
     synth.reset();
-    const loop = Boolean(options?.loop);
     const safeDur = Math.max(durationMs + 350, 500);
     let idx = 0;
     let songStartMs = performance.now();
@@ -302,7 +353,7 @@ class GsWavetableMidiPlayer {
       }
 
       if (idx >= events.length) {
-        if (loop) {
+        if (this.activeLoop) {
           if (elapsedMs >= safeDur) {
             this.synth.stopAll(false);
             songStartMs = performance.now();
@@ -318,7 +369,14 @@ class GsWavetableMidiPlayer {
     this.schedulerId = window.setInterval(pump, 20);
   }
 
-  public playMidsBytes(bytes: Uint8Array, options?: { loop?: boolean; audioCtx?: AudioContext }) {
+  public playMidsBytes(bytes: Uint8Array, options?: MidiPlayOptions) {
+    const trackKey = options?.trackKey || `mids:${hashMidiBytes(bytes)}`;
+    if (!options?.forceRestart && this.isPlayingTrack(trackKey)) {
+      if (options?.loop !== undefined) {
+        this.activeLoop = Boolean(options.loop);
+      }
+      return;
+    }
     const isSmf =
       bytes.length >= 4 &&
       bytes[0] === 0x4d &&
@@ -326,10 +384,89 @@ class GsWavetableMidiPlayer {
       bytes[2] === 0x68 &&
       bytes[3] === 0x64;
     const parsed = isSmf ? parseSmfToEvents(bytes) : parseMidsToEvents(bytes);
-    void this.playEvents(parsed.events, parsed.durationMs, options);
+    void this.playEvents(parsed.events, parsed.durationMs, { ...options, trackKey });
   }
 
-  public async playMidiUrl(url: string, options?: { loop?: boolean; audioCtx?: AudioContext }) {
+  public async playMidsPlaylist(
+    byteList: Uint8Array[],
+    options?: MidiPlayOptions
+  ) {
+    if (byteList.length === 0) return;
+    if (byteList.length === 1) {
+      this.playMidsBytes(byteList[0], options);
+      return;
+    }
+
+    const trackKey = options?.trackKey || `pl:${byteList.map(hashMidiBytes).join('|')}`;
+    if (!options?.forceRestart && this.isPlayingTrack(trackKey)) {
+      if (options?.loop !== undefined) {
+        this.activeLoop = Boolean(options.loop);
+      }
+      return;
+    }
+
+    this.stop();
+    this.activeTrackKey = trackKey;
+    this.activeLoop = Boolean(options?.loop);
+    this.isActivelyPlaying = true;
+
+    const token = this.playbackToken;
+    const synth = await this.ensureSynth(options?.audioCtx);
+    if (!synth || token !== this.playbackToken) {
+      if (token === this.playbackToken) {
+        this.isActivelyPlaying = false;
+        this.activeTrackKey = null;
+      }
+      return;
+    }
+
+    const songs = byteList.map((bytes) => {
+      const isSmf =
+        bytes.length >= 4 &&
+        bytes[0] === 0x4d &&
+        bytes[1] === 0x54 &&
+        bytes[2] === 0x68 &&
+        bytes[3] === 0x64;
+      return isSmf ? parseSmfToEvents(bytes) : parseMidsToEvents(bytes);
+    });
+
+    let songIdx = 0;
+    let evIdx = 0;
+    let songStartMs = performance.now();
+    synth.reset();
+
+    const pump = () => {
+      if (token !== this.playbackToken || !this.synth) return;
+      const song = songs[songIdx];
+      if (!song) {
+        this.stop();
+        return;
+      }
+      const elapsedMs = performance.now() - songStartMs;
+      while (evIdx < song.events.length && song.events[evIdx].timeMs <= elapsedMs + 25) {
+        this.dispatchEvent(this.synth, song.events[evIdx++]);
+      }
+      const safeDur = Math.max(song.durationMs + 250, 400);
+      if (evIdx >= song.events.length && elapsedMs >= safeDur) {
+        this.synth.stopAll(false);
+        if (songIdx + 1 < songs.length) {
+          songIdx++;
+        } else if (this.activeLoop) {
+          songIdx = 0;
+        } else {
+          this.stop();
+          return;
+        }
+        evIdx = 0;
+        songStartMs = performance.now();
+      }
+    };
+
+    pump();
+    this.schedulerId = window.setInterval(pump, 20);
+  }
+
+  public async playMidiUrl(url: string, options?: MidiPlayOptions) {
     const res = await fetch(url);
     if (!res.ok) return;
     const bytes = new Uint8Array(await res.arrayBuffer());

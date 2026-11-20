@@ -2,11 +2,14 @@ export interface KeyframePosition {
   x: number;
   y: number;
   z: number;
+  rotX?: number;
   rotY: number;
+  rotZ?: number;
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
   visible?: boolean;
+  color?: string;
 }
 
 export interface ActionKeyframe {
@@ -18,6 +21,7 @@ export interface ActionKeyframe {
 
 export interface PropActionKeyframe {
   action: PropAction;
+  anid?: number;
   celOffset?: number;
   freeze?: boolean;
 }
@@ -39,20 +43,14 @@ export interface ActorEntity {
   keyframes: Record<number, KeyframePosition>;
 }
 
-export type PropAction =
-  | 'at rest'
-  | 'grow'
-  | 'grow fast'
-  | 'shrink'
-  | 'shrink fast'
-  | 'spin'
-  | 'spin fast';
+export type PropAction = string;
 
 export interface PropEntity {
   id: string;
   tmplCno: number;
   name: string;
   action: PropAction;
+  anid?: number;
   actionKeyframes?: Record<number, PropActionKeyframe>;
   costumeCmids?: number[];
   costumeMtrls?: CostumeMtrlOverride[];
@@ -72,6 +70,11 @@ export interface ScreenTextBox {
   id: string;
   text: string;
   fontName: string;
+  fontSize?: number;
+  color?: string;
+  bgColor?: string;
+  bold?: boolean;
+  italic?: boolean;
   startFrame: number;
   endFrame: number;
   left: number;
@@ -90,6 +93,13 @@ export interface ImportedAudioCue {
   isMidi?: boolean;
   loop?: boolean;
   msndCno?: number;
+  isStopper?: boolean;
+  playlist?: {
+    audioData?: string;
+    midiData?: string;
+    isMidi?: boolean;
+    name?: string;
+  }[];
 }
 
 export interface CameraAngle {
