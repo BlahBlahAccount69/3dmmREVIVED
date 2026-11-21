@@ -491,7 +491,7 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
     }
 
     const nfrmFirst = 1;
-    const nfrmLast = nfrmFirst + Math.max(15, scene.totalFrames) - 1;
+    const nfrmLast = nfrmFirst + Math.max(1, scene.totalFrames) - 1;
     const scenChildKids: ChunkKid[] = [];
 
     // 1. GGFR: Camera cuts (sevt=3) + Audio/MIDI cues (sevt=1)

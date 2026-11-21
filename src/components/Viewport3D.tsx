@@ -464,6 +464,13 @@ function distToSegment2D(px: number, py: number, ax: number, ay: number, bx: num
   return Math.hypot(px - (ax + t * abx), py - (ay + t * aby));
 }
 
+function computeScrollingTransform(evalFrame: number, startFrame: number): string {
+  const elapsed = Math.max(0, evalFrame - startFrame);
+  // Slow, constant 3DMM rolling credits pace independent of box duration (~0.85cqw per 6-FPS frame)
+  const scrollUpCqw = elapsed * 0.85;
+  return `translateY(calc(12% - ${scrollUpCqw.toFixed(2)}cqw))`;
+}
+
 export const Viewport3D: React.FC<Viewport3DProps> = ({
   sceneData,
   sceneIndex = 0,
@@ -1056,6 +1063,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           fl.updateMatrixWorld();
         }
 
+        const evalNow = isPlayingRef.current
+          ? (livePlayheadPropRef.current?.current?.sceneIndex === sceneIndexRef.current
+              ? livePlayheadPropRef.current.current.renderFrame
+              : currentFrameRef.current)
+          : currentFrameRef.current;
+        applyStageAtFrameRef.current(evalNow);
         setLoadingStage(false);
         setSyncVersion((v) => v + 1);
       })
@@ -1416,14 +1429,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       grp.scale.set(pos.scaleX ?? 1, pos.scaleY ?? 1, pos.scaleZ ?? 1);
     });
 
-    // Update scrolling 2D text boxes smoothly in-place at full refresh rate
+    // Update scrolling 2D text boxes smoothly at authentic slow 3DMM speed
     (curScene.textBoxes || []).forEach((tb) => {
       if (!tb.isScrolling) return;
       const el = textBoxInnerRefs.current.get(tb.id);
       if (!el) return;
-      const spanFrames = Math.max(1, tb.endFrame - tb.startFrame);
-      const scrollProgress = Math.max(0, Math.min(1, (evalFrame - tb.startFrame) / spanFrames));
-      el.style.transform = `translateY(${(0.18 - scrollProgress * 0.95) * 100}%)`;
+      el.style.transform = computeScrollingTransform(evalFrame, tb.startFrame);
     });
   };
 
@@ -1935,8 +1946,6 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           const topPct = Math.max(0, Math.min(100, (tb.top / 306) * 100));
           const widthPct = Math.max(1, Math.min(100 - leftPct, ((tb.right - tb.left) / 544) * 100));
           const heightPct = Math.max(1, Math.min(100 - topPct, ((tb.bottom - tb.top) / 306) * 100));
-          const spanFrames = Math.max(1, tb.endFrame - tb.startFrame);
-          const scrollProgress = Math.max(0, Math.min(1, (scrollEvalFrame - tb.startFrame) / spanFrames));
           const fontSizeCqw = (((tb.fontSize ?? 14) * 1.18) / 544) * 100;
           const textColor = tb.color || '#f9f9f9';
 
@@ -1970,7 +1979,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 className="whitespace-pre-wrap break-words"
                 style={
                   tb.isScrolling
-                    ? { transform: `translateY(${(0.18 - scrollProgress * 0.95) * 100}%)` }
+                    ? { transform: computeScrollingTransform(scrollEvalFrame, tb.startFrame) }
                     : undefined
                 }
               >

@@ -132,5 +132,6 @@ export interface Scene {
 
 export interface Movie {
   title: string;
+  plot?: string;
   scenes: Scene[];
 }

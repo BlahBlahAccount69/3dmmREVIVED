@@ -151,7 +151,7 @@ export async function loadOfficial3mmMovie(
     const sDv = new DataView(scenBytes.buffer, scenBytes.byteOffset, scenBytes.byteLength);
     const nfrmLast = sDv.getInt32(4, true);
     const nfrmFirst = sDv.getInt32(8, true);
-    const totalFrames = Math.max(15, Math.min(1800, nfrmLast - nfrmFirst + 1));
+    const totalFrames = Math.max(1, Math.min(1800, nfrmLast - nfrmFirst + 1));
 
     const matchedBg = findMatchingBackground(scenMeta.name || '', catalog.scenes);
     let icam = 0;
@@ -533,10 +533,10 @@ export async function loadOfficial3mmMovie(
           eventsByFrame.set(f, arr);
         }
 
-        // Simulate frame-by-frame route & events (matching ACTOR.CPP)
-        let subX = actrBaseX;
-        let subY = actrBaseY;
-        let subZ = actrBaseZ;
+        // Simulate frame-by-frame route & events (matching ACTOR.CPP: subroute is relative to ACTR _dxs/_dys/_dzs)
+        let subX = 0;
+        let subY = 0;
+        let subZ = 0;
         let activeAnid = 0;
         let celIdx = 0;
         let curIrpt = 0;
@@ -762,9 +762,9 @@ export async function loadOfficial3mmMovie(
             Math.abs(sx - 1) > 0.01 || Math.abs(sy - 1) > 0.01 || Math.abs(sz - 1) > 0.01;
 
           const kfEntry: KeyframePosition = {
-            x: subX + pPos.x,
-            y: subY + pPos.y,
-            z: subZ + pPos.z,
+            x: actrBaseX + subX + pPos.x,
+            y: actrBaseY + subY + pPos.y,
+            z: actrBaseZ + subZ + pPos.z,
             rotY,
           };
           if (Math.abs(staticRotX) > 0.005) kfEntry.rotX = staticRotX;

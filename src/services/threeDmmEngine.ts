@@ -1437,11 +1437,19 @@ export function loadBackgroundView(bkgdCno: number, icam: number): Promise<Loade
     }
 
     let zbmpDepthTexture: THREE.DataTexture | null = null;
+    let zbData: { w: number; h: number; dv: DataView; pixStart: number } | null = null;
     const zbmpMeta = bkgdsCn.findKid(targetCamMeta, 'ZBMP');
     if (zbmpMeta) {
       const zbmpBytes = await bkgdsCn.readChunk('ZBMP', zbmpMeta.cno);
       const decoded = decodeZbmpToDepthTexture(zbmpBytes);
-      if (decoded) zbmpDepthTexture = decoded.texture;
+      if (decoded) {
+        zbmpDepthTexture = decoded.texture;
+        const zdv = new DataView(zbmpBytes.buffer, zbmpBytes.byteOffset, zbmpBytes.byteLength);
+        const pixStart = zbmpBytes.length - decoded.width * decoded.height * 2;
+        if (pixStart >= 8) {
+          zbData = { w: decoded.width, h: decoded.height, dv: zdv, pixStart };
+        }
+      }
     }
 
     // Parse GLLT lights if present
@@ -1459,7 +1467,7 @@ export function loadBackgroundView(bkgdCno: number, icam: number): Promise<Loade
       }
     }
 
-    // Compute guaranteed on-screen stageOrigin for 'stage' mode across all 188 CAMs
+    // Compute guaranteed visible, unoccluded stageOrigin for 'stage' mode across all 188 CAMs
     const safeFov = fovDeg > 1 ? fovDeg : 47;
     const safeHither = hither > 0.01 ? hither : 1;
     const safeYon = yon > 10 ? yon : 5000;
@@ -1467,20 +1475,63 @@ export function loadBackgroundView(bkgdCno: number, icam: number): Promise<Loade
     testCam.position.copy(camPosition);
     testCam.quaternion.copy(camQuaternion);
     testCam.updateMatrixWorld();
+    testCam.matrixWorldInverse.copy(testCam.matrixWorld).invert();
 
     const isVisibleStagePoint = (pt: THREE.Vector3) => {
       const dist = pt.distanceTo(camPosition);
-      if (dist < 10 || dist > safeYon * 0.85) return false;
+      if (dist < Math.max(6, safeHither + 2) || dist > safeYon * 0.85) return false;
       const p = pt.clone().project(testCam);
-      return p.z > 0 && p.z < 1 && Math.abs(p.x) <= 0.72 && p.y >= -0.92 && p.y <= 0.48;
+      if (p.z <= 0 || p.z >= 1 || Math.abs(p.x) > 0.72 || p.y < -0.92 || p.y > 0.48) return false;
+      if (!zbData) return true;
+
+      // Ensure chest (+5.0) and shins (+1.8) are NOT occluded by foreground ZBMP obstacles
+      for (const hOff of [5.0, 1.8]) {
+        const tp = new THREE.Vector3(pt.x, pt.y + hOff, pt.z).project(testCam);
+        if (tp.z <= 0 || tp.z >= 1 || Math.abs(tp.x) > 0.95 || Math.abs(tp.y) > 0.95) return false;
+        const px = Math.min(zbData.w - 1, Math.max(0, Math.round((tp.x * 0.5 + 0.5) * (zbData.w - 1))));
+        const py = Math.min(zbData.h - 1, Math.max(0, Math.round((1 - (tp.y * 0.5 + 0.5)) * (zbData.h - 1))));
+        const z16 = zbData.dv.getUint16(zbData.pixStart + (py * zbData.w + px) * 2, true);
+        const zbNdc = z16 >= 32767 ? 1.0 : z16 / 32768.0;
+        if (tp.z > zbNdc + 0.0005) return false;
+      }
+      return true;
     };
 
     let stageOrigin = aposes.find(isVisibleStagePoint)?.clone();
+    if (!stageOrigin && zbData) {
+      // Search centered & lower-screen floor intersections for an unoccluded placement spot
+      const vpInv = new THREE.Matrix4()
+        .multiplyMatrices(testCam.projectionMatrix, testCam.matrixWorldInverse)
+        .invert();
+      const targetFloorY = apos.y;
+      let bestScore = Infinity;
+      const nyList = [-0.45, -0.3, -0.6, -0.15, -0.75, 0.0];
+      const nxList = [0, -0.22, 0.22, -0.45, 0.45, -0.65, 0.65];
+      for (const ny of nyList) {
+        for (const nx of nxList) {
+          const rayPt = new THREE.Vector3(nx, ny, 0.5).applyMatrix4(vpInv);
+          const dir = rayPt.sub(camPosition).normalize();
+          if (Math.abs(dir.y) > 0.02) {
+            const t = (targetFloorY - camPosition.y) / dir.y;
+            if (t >= Math.max(6, safeHither + 3) && t <= 160) {
+              const cand = camPosition.clone().addScaledVector(dir, t);
+              if (isVisibleStagePoint(cand)) {
+                const score = Math.abs(nx) * 2.0 + Math.abs(t - 26) * 0.04 + Math.abs(ny + 0.45);
+                if (score < bestScore) {
+                  bestScore = score;
+                  stageOrigin = cand;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     if (!stageOrigin) {
       // Fallback: project camera forward ~26 units at floor level y = apos.y
       const camFwd3 = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuaternion);
       const tFloor =
-        Math.abs(camFwd3.y) > 0.05 && (apos.y - camPosition.y) / camFwd3.y > 10
+        Math.abs(camFwd3.y) > 0.05 && (apos.y - camPosition.y) / camFwd3.y > 6
           ? Math.min(48, (apos.y - camPosition.y) / camFwd3.y)
           : 26;
       stageOrigin = new THREE.Vector3(

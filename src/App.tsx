@@ -24,7 +24,8 @@ import {
 } from './services/threeDmmEngine';
 import { loadOfficial3mmMovie, OFFICIAL_SAMPLE_MOVIES } from './services/movie3mmParser';
 import { exportMovieTo3mmBytes } from './services/movie3mmWriter';
-import { sound3DMM } from './services/soundLibrary';
+import { CatalogSoundItem, sound3DMM } from './services/soundLibrary';
+import { generateAiMovie } from './services/aiMovieGenerator';
 import {
   resolveActiveCameraAtFrame,
   resolveInterpolatedKeyframe,
@@ -37,7 +38,7 @@ import { ActorPropPanel } from './components/ActorPropPanel';
 import { TimelineBar } from './components/TimelineBar';
 import { AudioImportModal } from './components/AudioImportModal';
 import { assetUrl } from './utils/assetUrl';
-import { FilePlus, Film, FolderOpen, Save } from 'lucide-react';
+import { BookOpen, FilePlus, Film, FolderOpen, Save, Sparkles, X } from 'lucide-react';
 
 export default function App() {
   const [movie, setMovie] = useState<Movie>(createDefaultMovie);
@@ -62,6 +63,12 @@ export default function App() {
   const [mobileTab, setMobileTab] = useState<'stage' | 'cast'>('stage');
   const [isAudioModalOpen, setIsAudioModalOpen] = useState(false);
   const [showSamplesModal, setShowSamplesModal] = useState(false);
+  const [showAiModal, setShowAiModal] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [showPlotBanner, setShowPlotBanner] = useState(true);
+  const [soundCatalog, setSoundCatalog] = useState<CatalogSoundItem[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Loading real Microsoft 3DMM assets...');
 
@@ -92,7 +99,10 @@ export default function App() {
 
   // Load real 3DMM Catalog & preload scenes, views, templates, sound catalog, UI WAVs, and MS GS Wavetable SoundFont
   useEffect(() => {
-    void sound3DMM.loadSoundCatalog();
+    void sound3DMM
+      .loadSoundCatalog()
+      .then((list) => setSoundCatalog(list))
+      .catch(() => {});
     sound3DMM.preloadUiWavs([
       'CANCEL.WAV', 'GOFRSTF.WAV', 'GOPREVF.WAV', 'GONEXTF.WAV', 'PLAY.WAV', 'STOP.WAV',
       'REMACTR.WAV', 'TBKOPEN.WAV', 'MOVE.WAV', 'GROW.WAV', 'SQUASH.WAV', 'SHRINK.WAV',
@@ -1283,6 +1293,54 @@ export default function App() {
     }
   };
 
+  const handleGenerateAiMovie = async () => {
+    if (isGeneratingAi) return;
+    setAiError(null);
+    setIsGeneratingAi(true);
+    setStatusMessage('Asking Gemini AI director to write a plot & stage your 3DMM movie...');
+    try {
+      const generated = await generateAiMovie({
+        prompt: aiPrompt,
+        catalog,
+        soundCatalog,
+      });
+      sound3DMM.stopAll();
+      setIsPlaying(false);
+      setMovie(generated);
+      setCurrentSceneIndex(0);
+      setCurrentFrame(0);
+      setRenderFrame(0);
+      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      const firstScene = generated.scenes[0];
+      const firstEntity = firstScene?.actors[0] || firstScene?.props[0] || firstScene?.tdtTexts?.[0];
+      setSelectedEntityId(firstEntity?.id || null);
+      setSelectedEntityType(
+        firstScene?.actors[0]
+          ? 'actor'
+          : firstScene?.props[0]
+          ? 'prop'
+          : firstScene?.tdtTexts?.[0]
+          ? 'tdt'
+          : null
+      );
+      setIsRecordingMovement(false);
+      setShowPlotBanner(Boolean(generated.plot));
+      setShowAiModal(false);
+      setMobileTab('stage');
+      void sound3DMM.playUiWav('FNEW.WAV');
+      setStatusMessage(
+        `AI created "${generated.title}" (${generated.scenes.length} scenes) — press Play to watch!`
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to generate AI movie.';
+      setAiError(msg);
+      void sound3DMM.playUiWav('ALERT2.WAV');
+      setStatusMessage(`AI Movie generation failed: ${msg}`);
+    } finally {
+      setIsGeneratingAi(false);
+    }
+  };
+
   const totalSceneObjects = currentScene
     ? currentScene.actors.length +
       currentScene.props.length +
@@ -1349,6 +1407,33 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => {
+              setAiError(null);
+              void sound3DMM.playUiWav('TBKOPEN.WAV');
+              setShowAiModal(true);
+            }}
+            disabled={catalog.scenes.length === 0}
+            title="Have Gemini AI direct a full 3DMM movie with plot, scenes, moving actors & props, camera cuts, and 2D/3D text"
+            className="bg-gradient-to-b from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 disabled:opacity-45 disabled:cursor-not-allowed border-t-2 border-l-2 border-amber-200 border-r-2 border-b-2 border-r-orange-950 border-b-orange-950 px-2.5 py-1 font-bold flex items-center gap-1.5 text-[#1a0a2e] shadow"
+          >
+            <Sparkles size={13} />
+            <span>AI Make Movie</span>
+          </button>
+
+          {movie.plot && (
+            <button
+              onClick={() => setShowPlotBanner((prev) => !prev)}
+              title="Show or hide the movie plot summary"
+              className={`studio-btn px-2 py-1 font-bold flex items-center gap-1 ${
+                showPlotBanner ? 'text-amber-300 border-amber-400' : 'text-purple-200'
+              }`}
+            >
+              <BookOpen size={13} />
+              <span>Plot</span>
+            </button>
+          )}
+
+          <button
             onClick={() => fileInputRef.current?.click()}
             className="studio-btn px-2.5 py-1 font-bold flex items-center gap-1.5 text-cyan-200"
           >
@@ -1386,6 +1471,25 @@ export default function App() {
         onAddOrOverwriteScene={handleAddOrOverwriteScene}
         onUpdateCurrentScene={handleUpdateCurrentScene}
       />
+
+      {movie.plot && showPlotBanner && (
+        <div className="bg-[#231048] border-b border-[#120624] px-3 py-1.5 text-[11px] text-amber-100 flex items-start justify-between gap-2 shrink-0 max-h-20 overflow-y-auto">
+          <div className="flex items-start gap-2 min-w-0">
+            <BookOpen size={13} className="text-amber-300 shrink-0 mt-0.5" />
+            <p className="leading-snug">
+              <span className="font-bold text-amber-300 mr-1.5">Plot:</span>
+              {movie.plot}
+            </p>
+          </div>
+          <button
+            onClick={() => setShowPlotBanner(false)}
+            aria-label="Hide Plot"
+            className="studio-btn px-1.5 py-0.5 text-[10px] shrink-0"
+          >
+            <X size={11} />
+          </button>
+        </div>
+      )}
 
       {!hasScene ? (
         /* Blank Movie: pure black screen with no object-adding or sound-adding buttons */
@@ -1589,6 +1693,93 @@ export default function App() {
                   <span className="text-[10px] text-purple-200 font-mono">{m.file}</span>
                 </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Gemini AI Movie Generator Modal */}
+      {showAiModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3">
+          <div className="studio-panel p-4 max-w-lg w-full text-xs text-white max-h-[92dvh] flex flex-col gap-3 overflow-y-auto">
+            <div className="flex items-center justify-between pb-2 border-b border-purple-700/80 shrink-0">
+              <div className="flex items-center gap-2 font-bold text-sm text-amber-300">
+                <Sparkles size={16} />
+                <span>AI Movie Director (Gemini)</span>
+              </div>
+              <button
+                onClick={() => !isGeneratingAi && setShowAiModal(false)}
+                disabled={isGeneratingAi}
+                className="studio-btn px-2 py-0.5 font-bold disabled:opacity-45"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-[11px] text-purple-100 leading-relaxed">
+              Gemini will write a movie plot and automatically build scenes with authentic 3DMM actors,
+              actions &amp; movement keyframes, animated props, camera angle cuts, sound/MIDI cues, and
+              optional 2D/3D text.
+            </p>
+
+            <div className="flex flex-col gap-1">
+              <label htmlFor="ai-movie-prompt" className="font-bold text-amber-200 text-[11px]">
+                Story Idea (optional — leave blank for a surprise):
+              </label>
+              <textarea
+                id="ai-movie-prompt"
+                rows={3}
+                value={aiPrompt}
+                onChange={(e) => setAiPrompt(e.target.value)}
+                disabled={isGeneratingAi}
+                placeholder="e.g. Bongo discovers a secret treasure chest in the haunted castle while a sneaky skeleton chases him before a rocket blasts off..."
+                className="studio-well p-2 text-xs text-white placeholder:text-purple-300/60 focus:outline-none resize-y"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                'Haunted castle treasure heist with spooky chase',
+                'Diner alien invasion & rocket escape',
+                'Space station dance party gone wrong',
+                'Detective mystery in the dark alley',
+              ].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  disabled={isGeneratingAi}
+                  onClick={() => setAiPrompt(preset)}
+                  className="studio-btn px-2 py-1 text-[10px] text-purple-100 text-left disabled:opacity-45"
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+
+            {aiError && (
+              <div className="bg-rose-950/80 border border-rose-500 px-2.5 py-2 text-[11px] text-rose-200">
+                {aiError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1 border-t border-purple-800/70">
+              <button
+                type="button"
+                disabled={isGeneratingAi}
+                onClick={() => setShowAiModal(false)}
+                className="studio-btn px-3 py-1.5 font-bold text-purple-100 disabled:opacity-45"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isGeneratingAi || catalog.scenes.length === 0}
+                onClick={() => void handleGenerateAiMovie()}
+                className="bg-gradient-to-b from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 disabled:opacity-55 border-t-2 border-l-2 border-amber-200 border-r-2 border-b-2 border-r-orange-950 border-b-orange-950 px-3.5 py-1.5 font-bold flex items-center gap-1.5 text-[#1a0a2e] shadow"
+              >
+                <Sparkles size={13} />
+                <span>{isGeneratingAi ? 'Directing Movie...' : 'Generate Movie'}</span>
+              </button>
             </div>
           </div>
         </div>
