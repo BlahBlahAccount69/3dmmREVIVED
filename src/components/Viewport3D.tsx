@@ -31,6 +31,7 @@ interface Viewport3DProps {
   sceneData: Scene;
   sceneIndex?: number;
   totalScenes?: number;
+  activeViewNumber?: number;
   currentFrame: number;
   renderFrame?: number;
   isPlaying?: boolean;
@@ -73,8 +74,6 @@ const _camForwardXZ = new THREE.Vector3();
 const _worldPosTmp = new THREE.Vector3();
 const _screenPtA = new THREE.Vector3();
 const _screenPtB = new THREE.Vector3();
-const _eulerTrim = new THREE.Euler(0, 0, 0, 'YXZ');
-const _quatTrim = new THREE.Quaternion();
 const _eulerRotA = new THREE.Euler(0, 0, 0, 'YXZ');
 const _eulerRotB = new THREE.Euler(0, 0, 0, 'YXZ');
 const _eulerRotOut = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -469,6 +468,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   sceneData,
   sceneIndex = 0,
   totalScenes = 1,
+  activeViewNumber,
   currentFrame,
   renderFrame,
   isPlaying = false,
@@ -581,8 +581,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     const well = wellRef.current;
     if (!well) return;
     const fit = () => {
-      const availW = Math.max(160, well.clientWidth - 16);
-      const availH = Math.max(90, well.clientHeight - 16);
+      const availW = Math.max(160, well.clientWidth - 22);
+      const availH = Math.max(90, well.clientHeight - 22);
       const ratio = 544 / 306;
       let w = availW;
       let h = w / ratio;
@@ -883,16 +883,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       flatShading: false,
     });
 
-    // Yellow wireframe rectangle outline shown strictly while dragging
+    // Yellow wireframe rectangle outline shown strictly while dragging.
+    // Depth-tested after actors/props so rear edges blocked by the object are partial (no Necker cube illusion).
     const yellowBoxGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(2, 2, 2));
     const yellowBoxMat = new THREE.LineBasicMaterial({
       color: 0xffff00,
-      depthTest: false,
-      transparent: true,
-      opacity: 0.96,
+      depthTest: true,
+      depthWrite: false,
     });
     const yellowOutlineBox = new THREE.LineSegments(yellowBoxGeo, yellowBoxMat);
-    yellowOutlineBox.renderOrder = 999;
+    yellowOutlineBox.renderOrder = 50;
     yellowOutlineBox.visible = false;
     scene.add(yellowOutlineBox);
     yellowOutlineBoxRef.current = yellowOutlineBox;
@@ -1004,21 +1004,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           cam.updateProjectionMatrix();
 
           cam.position.copy(bgView.camPosition);
-          _eulerTrim.set(
-            THREE.MathUtils.degToRad(activeCam.pitch),
-            THREE.MathUtils.degToRad(activeCam.yaw),
-            0
-          );
-          _quatTrim.setFromEuler(_eulerTrim);
-          cam.quaternion.copy(bgView.camQuaternion).multiply(_quatTrim);
+          cam.quaternion.copy(bgView.camQuaternion);
           cam.updateMatrixWorld();
           cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
         }
 
-        const untrimmed = Math.abs(activeCam.yaw) < 0.5 && Math.abs(activeCam.pitch) < 0.5;
         if (depthPrePassMatRef.current && depthPrePassMeshRef.current) {
           depthPrePassMatRef.current.uniforms.uZbmp.value = bgView.zbmpDepthTexture;
-          depthPrePassMeshRef.current.visible = Boolean(bgView.zbmpDepthTexture) && untrimmed;
+          depthPrePassMeshRef.current.visible = Boolean(bgView.zbmpDepthTexture);
         }
         if (floorShadowMatRef.current && floorShadowMeshRef.current && cameraRef.current) {
           const vp = new THREE.Matrix4().multiplyMatrices(
@@ -1027,12 +1020,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           );
           floorShadowMatRef.current.uniforms.uZbmp.value = bgView.zbmpDepthTexture;
           floorShadowMatRef.current.uniforms.uInvViewProj.value.copy(vp).invert();
-          floorShadowMeshRef.current.visible = Boolean(bgView.zbmpDepthTexture) && untrimmed;
+          floorShadowMeshRef.current.visible = Boolean(bgView.zbmpDepthTexture);
         }
 
         if (shadowPlaneRef.current) {
           shadowPlaneRef.current.position.copy(bgView.stageOrigin);
-          shadowPlaneRef.current.visible = !bgView.zbmpDepthTexture || !untrimmed;
+          shadowPlaneRef.current.visible = !bgView.zbmpDepthTexture;
         }
 
         // Aim directional shadow frustum cleanly around the active stage origin
@@ -1074,7 +1067,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [sceneData.bkgdCno, activeCam.icam, activeCam.yaw, activeCam.pitch]);
+  }, [sceneData.bkgdCno, activeCam.icam]);
 
   // Load & sync real 3DMM Actor rigs & all ACTNs (including multi-frame action switches)
   useEffect(() => {
@@ -1619,9 +1612,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
     if (yellowOutlineBoxRef.current) {
       yellowOutlineBoxRef.current.geometry.dispose();
-      yellowOutlineBoxRef.current.geometry = new THREE.EdgesGeometry(
-        new THREE.BoxGeometry(_dragSize.x, _dragSize.y, _dragSize.z)
-      );
+      const tmpBoxGeo = new THREE.BoxGeometry(_dragSize.x, _dragSize.y, _dragSize.z);
+      yellowOutlineBoxRef.current.geometry = new THREE.EdgesGeometry(tmpBoxGeo);
+      tmpBoxGeo.dispose();
       yellowOutlineBoxRef.current.position.copy(targetObj.position).add(boxOffsetRef.current);
       yellowOutlineBoxRef.current.visible = true;
     }
@@ -2009,11 +2002,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         )}
 
         {/* Stage Info Badges, Rotate 3D & Up/Down Drag Toggles */}
-        <div className="absolute top-1.5 left-2 right-2 flex justify-between items-center pointer-events-none text-[11px] font-bold gap-1.5">
-          <span className="bg-[#1b0e36]/85 text-amber-200 px-2 py-0.5 border border-[#8e63d6] truncate">
-            Scene {sceneIndex + 1}/{totalScenes}: {sceneData.sceneName} (View {activeCam.icam + 1})
+        <div className="absolute top-1.5 left-1.5 right-1.5 flex flex-wrap justify-between items-start pointer-events-none text-[10px] sm:text-[11px] font-bold gap-1">
+          <span className="bg-[#1b0e36]/85 text-amber-200 px-1.5 sm:px-2 py-0.5 border border-[#8e63d6] truncate max-w-full">
+            Scene {sceneIndex + 1}/{totalScenes}: {sceneData.sceneName} (View{' '}
+            {activeViewNumber ?? activeCam.icam + 1})
           </span>
-          <div className="flex items-center gap-1 pointer-events-auto shrink-0">
+          <div className="flex flex-wrap items-center gap-1 pointer-events-auto max-w-full">
             <button
               type="button"
               onClick={() => {
@@ -2021,7 +2015,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 onToggleRotateMode();
               }}
               title="Rotate Mode: Drag Left/Right turns Y, Up/Down tilts X, Shift+Drag rolls Z"
-              className={`px-2 py-0.5 border text-[11px] font-bold flex items-center gap-1 shadow ${
+              className={`px-1.5 sm:px-2 py-0.5 border font-bold flex items-center gap-1 shadow ${
                 rotateMode
                   ? 'bg-emerald-400 text-slate-950 border-white'
                   : 'bg-[#1b0e36]/90 text-purple-100 border-[#8e63d6] hover:brightness-125'
@@ -2032,7 +2026,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 alt=""
                 className="h-3.5 w-auto object-contain image-rendering-pixelated"
               />
-              <span>{rotateMode ? 'Rotate 3D: ON' : 'Rotate'}</span>
+              <span>{rotateMode ? 'Rotate: ON' : 'Rotate'}</span>
             </button>
             <button
               type="button"
@@ -2041,7 +2035,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 onToggleMoveUpDown();
               }}
               title="Toggle Up & Down drag mode (also use Up/Down arrow keys anytime)"
-              className={`px-2 py-0.5 border text-[11px] font-bold flex items-center gap-1 shadow ${
+              className={`px-1.5 sm:px-2 py-0.5 border font-bold flex items-center gap-1 shadow ${
                 moveUpDownMode
                   ? 'bg-amber-400 text-slate-950 border-white'
                   : 'bg-[#1b0e36]/90 text-cyan-200 border-[#8e63d6] hover:brightness-125'
@@ -2052,10 +2046,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 alt=""
                 className="h-3.5 w-auto object-contain image-rendering-pixelated"
               />
-              <span>{moveUpDownMode ? 'Up & Down: ON (L/R + U/D)' : 'Up & Down: OFF'}</span>
+              <span>
+                {moveUpDownMode ? 'Up/Down: ON' : 'Up/Down: OFF'}
+                <span className="hidden sm:inline">
+                  {moveUpDownMode ? ' (L/R + U/D)' : ''}
+                </span>
+              </span>
             </button>
-            <span className="bg-[#1b0e36]/85 text-cyan-200 px-2 py-0.5 border border-[#8e63d6] pointer-events-none">
-              f{currentFrame} / {sceneData.totalFrames} (24 FPS)
+            <span className="bg-[#1b0e36]/85 text-cyan-200 px-1.5 sm:px-2 py-0.5 border border-[#8e63d6] pointer-events-none">
+              f{currentFrame}/{sceneData.totalFrames}
+              <span className="hidden sm:inline"> (24 FPS)</span>
             </span>
           </div>
         </div>

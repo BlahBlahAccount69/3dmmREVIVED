@@ -29,9 +29,9 @@ export const SceneBar: React.FC<SceneBarProps> = ({
     currentScene && (currentScene.actors.length > 0 || currentScene.props.length > 0);
 
   return (
-    <div className="bg-[#2a1453] border-b-2 border-[#120624] px-2.5 py-1 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-100 select-none">
+    <div className="bg-[#2a1453] border-b-2 border-[#120624] px-2.5 py-1 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-100 select-none shrink-0 min-w-0">
       {/* Scenes Sequence Strip */}
-      <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 max-w-full">
+      <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 max-w-full min-w-0">
         <div className="flex items-center gap-1.5 px-2 py-0.5 studio-well text-amber-300 font-bold text-[11px] shrink-0">
           <img
             src={assetUrl('3dmm/bmp/1SCEN.BMP')}
@@ -83,8 +83,8 @@ export const SceneBar: React.FC<SceneBarProps> = ({
 
       {/* Quick Scene Setting Switcher (All 12 real BKGDS.3CN stages) */}
       {scenes.length > 0 ? (
-        <div className="flex items-center gap-1.5 text-xs text-amber-200 shrink-0">
-          <span className="font-bold">Setting:</span>
+        <div className="flex items-center gap-1.5 text-xs text-amber-200 max-w-full min-w-0">
+          <span className="font-bold shrink-0">Setting:</span>
           <select
             value={currentScene?.bkgdCno ?? 0}
             onChange={(e) => {
@@ -95,7 +95,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
                 onUpdateCurrentScene(found);
               }
             }}
-            className="studio-well px-2 py-0.5 text-xs text-white focus:outline-none cursor-pointer"
+            className="studio-well px-2 py-0.5 text-xs text-white focus:outline-none cursor-pointer max-w-full min-w-0"
           >
             {catalogScenes.length > 0 ? (
               catalogScenes.map((st) => (
@@ -109,7 +109,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
           </select>
         </div>
       ) : (
-        <div className="text-[11px] font-bold text-amber-300 px-2 py-0.5 studio-well shrink-0">
+        <div className="text-[11px] font-bold text-amber-300 px-2 py-0.5 studio-well max-w-full min-w-0">
           Blank Movie — Click &quot;Add Scene&quot; to start
         </div>
       )}
@@ -117,7 +117,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
       {/* Add Scene Next Modal (All 12 real 3DMM backgrounds with MBMP thumbnails) */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-          <div className="studio-panel p-4 max-w-2xl w-full text-xs text-white max-h-[85vh] flex flex-col">
+          <div className="studio-panel p-4 max-w-2xl w-full text-xs text-white max-h-[90dvh] flex flex-col">
             <div className="flex items-center justify-between pb-2.5 border-b border-purple-700/80 shrink-0">
               <div className="flex items-center gap-2">
                 <img

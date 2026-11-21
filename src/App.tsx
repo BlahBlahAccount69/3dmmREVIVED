@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActorEntity,
-  CameraAngle,
   CameraCutEvent,
   ImportedAudioCue,
   KeyframePosition,
@@ -375,46 +374,6 @@ export default function App() {
         cameraCuts: baseCuts,
       };
       setStatusMessage(`Camera cut to View #${icam + 1} at Frame ${currentFrame}.`);
-    }
-    setMovie({ ...movie, scenes: updated });
-  };
-
-  const handleChangeCameraAngle = (angle: CameraAngle) => {
-    if (!currentScene) return;
-    const updated = [...movie.scenes];
-    if (currentFrame === 0 && (!currentScene.cameraCuts || currentScene.cameraCuts.length === 0)) {
-      updated[currentSceneIndex] = {
-        ...currentScene,
-        cameraAngle: angle,
-      };
-    } else {
-      const baseCuts: CameraCutEvent[] =
-        currentScene.cameraCuts && currentScene.cameraCuts.length > 0
-          ? [...currentScene.cameraCuts]
-          : [
-              {
-                frame: 0,
-                icam: currentScene.icam,
-                yaw: currentScene.cameraAngle.yaw,
-                pitch: currentScene.cameraAngle.pitch,
-              },
-            ];
-      const idx = baseCuts.findIndex((c) => c.frame === currentFrame);
-      const activeCam = resolveActiveCameraAtFrame(currentScene, currentFrame);
-      const nextCut: CameraCutEvent = {
-        frame: currentFrame,
-        icam: activeCam.icam,
-        yaw: angle.yaw,
-        pitch: angle.pitch,
-      };
-      if (idx >= 0) baseCuts[idx] = nextCut;
-      else baseCuts.push(nextCut);
-      baseCuts.sort((a, b) => a.frame - b.frame);
-      updated[currentSceneIndex] = {
-        ...currentScene,
-        cameraAngle: currentFrame === 0 ? angle : currentScene.cameraAngle,
-        cameraCuts: baseCuts,
-      };
     }
     setMovie({ ...movie, scenes: updated });
   };
@@ -1331,8 +1290,15 @@ export default function App() {
       (currentScene.textBoxes?.length || 0)
     : 0;
 
+  const activeViewSlot =
+    activeCatalogScene && activeCatalogScene.views.length > 0
+      ? activeCatalogScene.views.findIndex((v) => v.icam === activeCamAtFrame.icam)
+      : -1;
+  const activeViewNumber =
+    activeViewSlot >= 0 ? activeViewSlot + 1 : activeCamAtFrame.icam + 1;
+
   return (
-    <div className="w-screen h-screen bg-[#16092e] flex flex-col overflow-hidden select-none">
+    <div className="studio-app-shell bg-[#16092e] select-none">
       <input
         ref={fileInputRef}
         type="file"
@@ -1432,9 +1398,7 @@ export default function App() {
             currentViewIndex={activeCamAtFrame.icam}
             cameraCuts={currentScene!.cameraCuts}
             catalogViews={activeCatalogScene?.views || []}
-            cameraAngle={{ yaw: activeCamAtFrame.yaw, pitch: activeCamAtFrame.pitch }}
             onSelectCameraView={handleSelectCameraView}
-            onChangeCameraAngle={handleChangeCameraAngle}
             onDeleteCameraCutAtFrame={handleDeleteCameraCutAtFrame}
           />
 
@@ -1463,12 +1427,13 @@ export default function App() {
           </div>
 
           {/* Main Studio Workspace */}
-          <div className="flex-1 flex overflow-hidden relative">
-            <div className={`flex-1 relative ${mobileTab === 'stage' ? 'flex' : 'hidden md:flex'}`}>
+          <div className="flex-1 min-h-0 min-w-0 flex flex-col md:flex-row overflow-hidden relative">
+            <div className={`flex-1 min-h-0 min-w-0 relative ${mobileTab === 'stage' ? 'flex' : 'hidden md:flex'}`}>
               <Viewport3D
                 sceneData={currentScene!}
                 sceneIndex={currentSceneIndex}
                 totalScenes={movie.scenes.length}
+                activeViewNumber={activeViewNumber}
                 currentFrame={currentFrame}
                 renderFrame={renderFrame}
                 isPlaying={isPlaying}
@@ -1514,7 +1479,7 @@ export default function App() {
               />
             </div>
 
-            <div className={`${mobileTab === 'cast' ? 'flex flex-1 w-full' : 'hidden md:flex'}`}>
+            <div className={`${mobileTab === 'cast' ? 'flex flex-1 min-h-0 min-w-0 w-full' : 'hidden md:flex md:min-h-0'}`}>
               <ActorPropPanel
                 currentFrame={currentFrame}
                 totalFrames={currentScene!.totalFrames}
@@ -1588,9 +1553,9 @@ export default function App() {
       )}
 
       {/* Footer Info Strip */}
-      <div className="bg-[#180a33] border-t-2 border-[#120624] px-3 py-1 text-[11px] text-purple-200 flex items-center justify-between shrink-0">
-        <span className="truncate mr-2">{statusMessage}</span>
-        <span className="font-mono text-amber-300 shrink-0">
+      <div className="bg-[#180a33] border-t-2 border-[#120624] px-3 py-1 text-[11px] text-purple-200 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 shrink-0 min-w-0">
+        <span className="truncate max-w-full">{statusMessage}</span>
+        <span className="font-mono text-amber-300 text-[10px] sm:text-[11px] break-words">
           {currentScene
             ? `Actors: ${currentScene.actors.length} | Props: ${currentScene.props.length} | 3D Words: ${currentScene.tdtTexts?.length || 0} | 2D Text: ${currentScene.textBoxes?.length || 0} | Sounds: ${currentScene.audios.length}`
             : 'Blank Movie (0 Scenes)'}
@@ -1600,8 +1565,8 @@ export default function App() {
       {/* 21 Authentic .3MM Sample Movies Modal */}
       {showSamplesModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-          <div className="studio-panel p-4 max-w-lg w-full text-xs text-white max-h-[80vh] flex flex-col">
-            <div className="flex items-center justify-between pb-2.5 border-b border-purple-700/80">
+          <div className="studio-panel p-4 max-w-lg w-full text-xs text-white max-h-[90dvh] flex flex-col">
+            <div className="flex items-center justify-between pb-2.5 border-b border-purple-700/80 shrink-0">
               <div className="flex items-center gap-2 font-bold text-sm text-amber-300">
                 <Film size={16} />
                 <span>Official 3DMM Sample Movies (21 .3MM Files)</span>

@@ -38,9 +38,9 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
   const currentAudioCue = audioCues.find((a) => a.frame === currentFrame);
 
   return (
-    <div className="bg-[#2c1557] border-t-2 border-[#8c63dc] p-2 flex flex-col gap-1.5 text-xs text-slate-100 select-none">
+    <div className="bg-[#2c1557] border-t-2 border-[#8c63dc] p-2 flex flex-col gap-1.5 text-xs text-slate-100 select-none shrink-0 min-w-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
           <button
             onClick={() => {
               void sound3DMM.playUiWav('GOFRSTF.WAV');
@@ -112,9 +112,9 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
         </div>
 
         {/* Sound & MIDI Cue Controls */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 max-w-full min-w-0">
           {currentAudioCue ? (
-            <div className="bg-[#3b206f] border-2 border-amber-400 px-2 py-0.5 flex items-center gap-1.5 text-[11px]">
+            <div className="bg-[#3b206f] border-2 border-amber-400 px-2 py-0.5 flex items-center gap-1.5 text-[11px] max-w-full min-w-0">
               {currentAudioCue.isMidi ? (
                 <img src={assetUrl('3dmm/bmp/3NOTE.BMP')} alt="" className="h-4 w-auto object-contain image-rendering-pixelated" />
               ) : (

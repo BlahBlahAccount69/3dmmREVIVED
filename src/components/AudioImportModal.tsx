@@ -86,16 +86,16 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-      <div className="studio-panel max-w-lg w-full text-xs text-white overflow-hidden">
+      <div className="studio-panel max-w-lg w-full max-h-[90dvh] text-xs text-white overflow-hidden flex flex-col">
         {/* Modal Header */}
-        <div className="bg-[#43217c] border-b-2 border-[#120624] px-3 py-2 flex items-center justify-between">
-          <div className="flex items-center gap-2 font-bold text-amber-300 text-sm">
+        <div className="bg-[#43217c] border-b-2 border-[#120624] px-3 py-2 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2 font-bold text-amber-300 text-sm min-w-0">
             <img
               src={assetUrl('3dmm/bmp/3NOTE.BMP')}
               alt=""
-              className="h-5 w-auto object-contain image-rendering-pixelated"
+              className="h-5 w-auto object-contain image-rendering-pixelated shrink-0"
             />
-            <span>Add 3DMM Sound / MIDI at Frame {currentFrame}</span>
+            <span className="truncate">Add 3DMM Sound / MIDI at Frame {currentFrame}</span>
           </div>
           <button
             onClick={() => {
@@ -103,14 +103,14 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
               void sound3DMM.playUiWav('CANCEL.WAV');
               onClose();
             }}
-            className="studio-btn px-2 py-0.5 font-bold text-white"
+            className="studio-btn px-2 py-0.5 font-bold text-white shrink-0"
           >
             ✕
           </button>
         </div>
 
         {/* Category Tabs */}
-        <div className="flex flex-wrap gap-1.5 p-2.5 border-b border-purple-900 bg-[#1b0b38]">
+        <div className="flex flex-wrap gap-1.5 p-2.5 border-b border-purple-900 bg-[#1b0b38] shrink-0">
           <button
             onClick={() => setTab('sfx')}
             className={`px-2.5 py-1 font-bold ${
@@ -145,21 +145,21 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
           </button>
         </div>
 
-        <div className="p-3 flex flex-col gap-2.5 max-h-[60vh]">
+        <div className="p-3 flex flex-col gap-2.5 flex-1 min-h-0">
           {tab !== 'custom' ? (
             <>
-              <div className="flex gap-1.5">
+              <div className="flex flex-wrap gap-1.5 shrink-0">
                 <input
                   type="text"
                   placeholder="Search SOUND.3TH & SNDS.3CN..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  className="studio-well flex-1 px-2.5 py-1.5 text-white text-xs focus:outline-none"
+                  className="studio-well flex-1 min-w-0 px-2.5 py-1.5 text-white text-xs focus:outline-none"
                 />
                 {tab === 'music' && (
                   <button
                     onClick={() => sound3DMM.stopMusic()}
-                    className="studio-btn px-2.5 py-1 flex items-center gap-1 text-rose-200"
+                    className="studio-btn px-2.5 py-1 flex items-center gap-1 text-rose-200 shrink-0"
                     title="Stop MIDI Preview"
                   >
                     <Square size={10} fill="currentColor" />
@@ -167,7 +167,7 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
                   </button>
                 )}
               </div>
-              <div className="overflow-y-auto max-h-64 flex flex-col gap-1 pr-1">
+              <div className="overflow-y-auto flex-1 min-h-0 max-h-64 flex flex-col gap-1 pr-1">
                 {filtered.map((item) => (
                   <div
                     key={item.cno}

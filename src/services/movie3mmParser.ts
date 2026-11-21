@@ -201,9 +201,6 @@ export async function loadOfficial3mmMovie(
           if (!firstCamSet && relFrame === 0) {
             icam = cutCam;
             firstCamSet = true;
-          } else if (!firstCamSet && cameraCuts.length === 0) {
-            icam = cutCam;
-            firstCamSet = true;
           }
           cameraCuts.push({ frame: relFrame, icam: cutCam });
         } else if (sevt === 1 && entry.varLength >= 36) {
@@ -786,7 +783,9 @@ export async function loadOfficial3mmMovie(
           if (onStage && !isFrozen) {
             const act = loadedActions.get(activeAnid) || tmplObj?.actionCache.get(0);
             const celDwr =
-              act && act.cels.length > 0 ? act.cels[celIdx % act.cels.length].dwr : 0;
+              act && act.cels.length > 0
+                ? act.cels[Math.min(act.cels.length - 1, Math.max(0, celIdx))].dwr
+                : 0;
             const step = forcedStep !== null ? forcedStep : celDwr;
             celIdx++;
 

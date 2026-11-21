@@ -9,7 +9,6 @@ import {
 import {
   CatalogActorItem,
   CatalogPropItem,
-  isActionCyclic,
   loadTdtMaterialSwatches,
   loadTemplate,
   ParsedTemplate,
@@ -298,7 +297,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               onChange={(e) =>
                 onUpdateEntityRotation(id, kind, curRotX, degToRad(Number(e.target.value)), curRotZ)
               }
-              className="accent-emerald-400 h-1.5 cursor-pointer"
+              className="accent-emerald-400 h-1.5 cursor-pointer w-full min-w-0"
             />
           </label>
           <button
@@ -313,7 +312,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
 
         {/* X & Z Axes (Pitch forward/back & Roll sideways) */}
         <div className="grid grid-cols-2 gap-1.5">
-          <label className="flex flex-col gap-0.5">
+          <label className="flex flex-col gap-0.5 min-w-0">
             <span className="text-purple-200 flex justify-between">
               <span>Tilt (X)</span>
               <span className="font-mono text-cyan-200">{degX}°</span>
@@ -327,10 +326,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               onChange={(e) =>
                 onUpdateEntityRotation(id, kind, degToRad(Number(e.target.value)), curRotY, curRotZ)
               }
-              className="accent-amber-400 h-1.5 cursor-pointer"
+              className="accent-amber-400 h-1.5 cursor-pointer w-full min-w-0"
             />
           </label>
-          <label className="flex flex-col gap-0.5">
+          <label className="flex flex-col gap-0.5 min-w-0">
             <span className="text-purple-200 flex justify-between">
               <span>Roll (Z)</span>
               <span className="font-mono text-cyan-200">{degZ}°</span>
@@ -344,7 +343,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               onChange={(e) =>
                 onUpdateEntityRotation(id, kind, curRotX, curRotY, degToRad(Number(e.target.value)))
               }
-              className="accent-cyan-400 h-1.5 cursor-pointer"
+              className="accent-cyan-400 h-1.5 cursor-pointer w-full min-w-0"
             />
           </label>
         </div>
@@ -392,7 +391,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
             {curScaleX.toFixed(2)}×{curScaleY.toFixed(2)}
           </span>
         </div>
-        <div className="grid grid-cols-5 gap-1 text-[10px]">
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-1 text-[10px]">
           <button
             type="button"
             onClick={() => {
@@ -471,7 +470,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           </button>
         </div>
         <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-          <label className="flex flex-col gap-0.5">
+          <label className="flex flex-col gap-0.5 min-w-0">
             <span className="text-purple-200">Width: {curScaleX.toFixed(2)}×</span>
             <input
               type="range"
@@ -483,10 +482,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                 const w = Number(e.target.value);
                 onUpdateEntityScale(id, kind, w, curScaleY, w);
               }}
-              className="accent-amber-400 h-1.5 cursor-pointer"
+              className="accent-amber-400 h-1.5 cursor-pointer w-full min-w-0"
             />
           </label>
-          <label className="flex flex-col gap-0.5">
+          <label className="flex flex-col gap-0.5 min-w-0">
             <span className="text-purple-200">Height: {curScaleY.toFixed(2)}×</span>
             <input
               type="range"
@@ -498,7 +497,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                 const h = Number(e.target.value);
                 onUpdateEntityScale(id, kind, curScaleX, h, curScaleZ);
               }}
-              className="accent-cyan-400 h-1.5 cursor-pointer"
+              className="accent-cyan-400 h-1.5 cursor-pointer w-full min-w-0"
             />
           </label>
         </div>
@@ -506,7 +505,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
 
       {/* Specific Frame Placement, Active Frame & Pose Cel Controls */}
       <div className="studio-well p-1.5 flex flex-col gap-1.5 text-[10px]">
-        <div className="flex items-center justify-between gap-1">
+        <div className="flex flex-wrap items-center justify-between gap-1">
           <span className="font-bold text-cyan-200">Frame Timing:</span>
           <button
             type="button"
@@ -521,7 +520,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           </button>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           <span className="text-purple-200 shrink-0">Frame:</span>
           <input
             type="number"
@@ -558,7 +557,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
         </div>
 
         {kind !== 'tdt' && (
-          <div className="flex items-center justify-between gap-1">
+          <div className="flex flex-wrap items-center justify-between gap-1">
             <span className="text-purple-200 shrink-0">
               Pose Cel ({celsCount > 0 ? celsCount : 'auto'}):
             </span>
@@ -642,10 +641,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
   };
 
   return (
-    <div className="bg-[#210f44] border-l-2 border-[#120624] p-2.5 w-full md:w-80 shrink-0 flex flex-col gap-2.5 text-xs text-slate-100 overflow-y-auto select-none">
+    <div className="bg-[#210f44] md:border-l-2 border-t-2 md:border-t-0 border-[#120624] p-2.5 w-full md:w-72 lg:w-80 flex-1 md:flex-none min-h-0 min-w-0 flex flex-col gap-2.5 text-xs text-slate-100 overflow-y-auto select-none">
       {/* Real 3DMM Talent Book, Props Cabinet & Words Maker */}
-      <div className="studio-panel p-2 flex flex-col gap-2">
-        <div className="flex gap-1">
+      <div className="studio-panel p-2 flex flex-col gap-2 shrink-0">
+        <div className="flex flex-wrap gap-1">
           <button
             onClick={() => {
               void sound3DMM.playUiWav('DROPDN.WAV');
@@ -1034,7 +1033,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                   found?.name || (anid === 0 ? 'At Rest' : `Action ${anid}`)
                 );
               }}
-              className="studio-well px-2 py-1 text-xs text-white focus:outline-none cursor-pointer"
+              className="studio-well px-2 py-1 text-xs text-white focus:outline-none cursor-pointer w-full min-w-0"
             >
               {selectedTemplate && selectedTemplate.actions.length > 0 ? (
                 selectedTemplate.actions.map((act) => (
@@ -1110,11 +1109,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               : activeActorAction.celOffset +
                 Math.max(0, currentFrame - activeActorAction.startFrame);
             const dispCel =
-              celsLen > 0
-                ? isActionCyclic(actObj)
-                  ? curCel % celsLen
-                  : Math.max(0, Math.min(celsLen - 1, curCel))
-                : curCel;
+              celsLen > 0 ? Math.max(0, Math.min(celsLen - 1, curCel)) : curCel;
             return renderStretchAndFrameControls(
               selectedActor.id,
               'actor',
@@ -1204,7 +1199,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                   else void sound3DMM.playUiWav('SACT.WAV');
                   onUpdatePropAction(selectedProp.id, name, anid);
                 }}
-                className="studio-well px-2 py-1 text-xs text-white focus:outline-none cursor-pointer"
+                className="studio-well px-2 py-1 text-xs text-white focus:outline-none cursor-pointer w-full min-w-0"
               >
                 {selectedTemplate.actions.map((act) => (
                   <option key={act.anid} value={act.anid}>
@@ -1223,7 +1218,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                   else void sound3DMM.playUiWav('ACESORY.WAV');
                   onUpdatePropAction(selectedProp.id, act);
                 }}
-                className="studio-well px-2 py-1 text-xs text-white focus:outline-none cursor-pointer"
+                className="studio-well px-2 py-1 text-xs text-white focus:outline-none cursor-pointer w-full min-w-0"
               >
                 {PROP_ACTIONS.map((pAct) => (
                   <option key={pAct} value={pAct}>
@@ -1317,11 +1312,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               : activePropAction.celOffset +
                 Math.max(0, currentFrame - activePropAction.startFrame);
             const dispCel =
-              celsLen > 0
-                ? isActionCyclic(actObj)
-                  ? curCel % celsLen
-                  : Math.max(0, Math.min(celsLen - 1, curCel))
-                : curCel;
+              celsLen > 0 ? Math.max(0, Math.min(celsLen - 1, curCel)) : curCel;
             return renderStretchAndFrameControls(
               selectedProp.id,
               'prop',
@@ -1625,7 +1616,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           </div>
 
           <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-            <label className="flex flex-col gap-0.5">
+            <label className="flex flex-col gap-0.5 min-w-0">
               <span className="text-purple-200">X Position: {selectedTextBox.left}</span>
               <input
                 type="range"
@@ -1640,10 +1631,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                     right: Math.min(544, left + w),
                   });
                 }}
-                className="accent-cyan-400 h-1.5"
+                className="accent-cyan-400 h-1.5 w-full min-w-0"
               />
             </label>
-            <label className="flex flex-col gap-0.5">
+            <label className="flex flex-col gap-0.5 min-w-0">
               <span className="text-purple-200">Y Position: {selectedTextBox.top}</span>
               <input
                 type="range"
@@ -1658,7 +1649,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                     bottom: Math.min(306, top + h),
                   });
                 }}
-                className="accent-amber-400 h-1.5"
+                className="accent-amber-400 h-1.5 w-full min-w-0"
               />
             </label>
           </div>

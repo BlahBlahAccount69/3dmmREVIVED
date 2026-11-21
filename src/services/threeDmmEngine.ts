@@ -234,15 +234,26 @@ export function loadThreeDmmCatalog(): Promise<ThreeDmmCatalog> {
         .sort((a, b) => a.kid.chid - b.kid.chid);
 
       for (const { kid, meta: cathMeta } of cathKids) {
+        const cathData = await bkgdsTh.readChunk('CATH', cathMeta.cno);
+        const cathDv = new DataView(
+          cathData.buffer,
+          cathData.byteOffset,
+          cathData.byteLength
+        );
+        const realIcam = cathData.byteLength >= 12 ? cathDv.getInt32(8, true) : kid.chid;
+
         let viewThumb: string | null = null;
-        const viewMbmp = bkgdsTh.findKid(cathMeta, 'MBMP');
+        const cathGokd = bkgdsTh.findKid(cathMeta, 'GOKD');
+        const viewMbmp =
+          bkgdsTh.findKid(cathMeta, 'MBMP') ||
+          (cathGokd ? bkgdsTh.findKid(cathGokd, 'MBMP') : undefined);
         if (viewMbmp) {
           viewThumb = mbmpToDataUrl(await bkgdsTh.readChunk('MBMP', viewMbmp.cno), palette);
         } else if (kid.chid === 0) {
           viewThumb = sceneThumb;
         }
         views.push({
-          icam: kid.chid,
+          icam: realIcam,
           cathCno: cathMeta.cno,
           thumbDataUrl: viewThumb || sceneThumb,
         });
@@ -1159,38 +1170,10 @@ export function applyGroupColorOverride(group: THREE.Group, colorHex?: string) {
   });
 }
 
-const CYCLIC_ACTION_PATTERNS = [
-  /^at rest$/i,
-  /^walk/i,
-  /^run/i,
-  /^crawl/i,
-  /^sneak/i,
-  /^fall$/i,
-  /^fly$/i,
-  /^dance$/i,
-  /^spin/i,
-  /^talk/i,
-  /^laugh$/i,
-  /^mad,\s*sad$/i,
-  /^think$/i,
-  /^yell$/i,
-];
-
-export function isActionCyclic(action?: Pick<ParsedAction, 'name' | 'grfactn'> | null): boolean {
-  if (!action) return false;
-  if ((action.grfactn & 0x08) === 0) return true;
-  const norm = (action.name || '').trim();
-  return CYCLIC_ACTION_PATTERNS.some((re) => re.test(norm));
-}
-
 export function applyActionCelToRig(rig: TemplateRig, action: ParsedAction, frame: number) {
   const len = action.cels.length;
   if (len === 0) return;
-  const cyclic = isActionCyclic(action);
-  const rawIdx = Math.floor(frame);
-  const icel = cyclic
-    ? ((rawIdx % len) + len) % len
-    : Math.max(0, Math.min(len - 1, rawIdx));
+  const icel = Math.max(0, Math.min(len - 1, Math.floor(frame)));
   const cel = action.cels[icel];
   const { parts, meshes, template, overrideGeometries } = rig;
 
@@ -1232,17 +1215,17 @@ const _sB = new THREE.Vector3();
 
 /**
  * 24 FPS skeletal / part cel blending between adjacent 6 FPS cels.
- * Smoothly blends position, quaternion (slerp), and scale when body parts match.
+ * Smoothly blends position, quaternion (slerp), and scale when body parts match,
+ * holding on the final cel once finished (no looping).
  */
 export function applyActionCelBlendedToRig(rig: TemplateRig, action: ParsedAction, frame: number) {
   const len = action.cels.length;
   if (len === 0) return;
-  const cyclic = isActionCyclic(action);
-  if (!cyclic && frame >= len - 1) {
+  if (frame >= len - 1) {
     applyActionCelToRig(rig, action, len - 1);
     return;
   }
-  const clampedFrame = cyclic ? frame : Math.max(0, frame);
+  const clampedFrame = Math.max(0, frame);
   const baseIdx = Math.floor(clampedFrame);
   const frac = clampedFrame - baseIdx;
   if (frac < 1e-3 || len === 1) {
@@ -1250,8 +1233,8 @@ export function applyActionCelBlendedToRig(rig: TemplateRig, action: ParsedActio
     return;
   }
 
-  const icelA = cyclic ? ((baseIdx % len) + len) % len : Math.max(0, Math.min(len - 1, baseIdx));
-  const icelB = cyclic ? (icelA + 1) % len : Math.min(len - 1, icelA + 1);
+  const icelA = Math.max(0, Math.min(len - 1, baseIdx));
+  const icelB = Math.min(len - 1, icelA + 1);
   const celA = action.cels[icelA];
   const celB = action.cels[icelB];
   const { parts, meshes, template, overrideGeometries } = rig;
