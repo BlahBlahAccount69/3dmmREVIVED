@@ -1,18 +1,22 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { KeyframePosition, PropAction, Scene } from '../types/movie';
+import { KeyframePosition, PropAction, Scene, TdtTextEntity } from '../types/movie';
 import {
   applyActionCelBlendedToRig,
+  applyActionCelToRig,
   applyCostumeToRig,
   applyGroupColorOverride,
+  applyObjectShadingMode,
   applyPropActionTransform,
   applyRigColorOverride,
+  applyTdtActionTransform,
   buildTdtTextGroup,
   instantiateTemplateRig,
   loadAction,
   loadBackgroundView,
   LoadedBackgroundView,
   loadTemplate,
+  normalizeTdtActionName,
   ParsedAction,
   TemplateRig,
 } from '../services/threeDmmEngine';
@@ -25,6 +29,9 @@ export interface LivePlayheadState {
   sceneIndex: number;
   frame: number;
   renderFrame: number;
+  scrollHoldActive?: boolean;
+  scrollElapsedSec?: number;
+  completedScrollIds?: Record<string, boolean>;
 }
 
 interface Viewport3DProps {
@@ -35,6 +42,8 @@ interface Viewport3DProps {
   currentFrame: number;
   renderFrame?: number;
   isPlaying?: boolean;
+  enableInterpolation?: boolean;
+  enableShading?: boolean;
   livePlayheadRef?: React.MutableRefObject<LivePlayheadState>;
   selectedEntityId: string | null;
   onSelectEntity: (id: string | null, type: StageEntityType | null) => void;
@@ -247,6 +256,30 @@ export function resolvePropActionAtFrame(
   return { action: prop.action, anid: prop.anid, startFrame: 0, celOffset: 0, freeze: false };
 }
 
+export function resolveTdtActionAtFrame(
+  tdt: TdtTextEntity,
+  frame: number
+): { action: string; startFrame: number; freeze: boolean } {
+  const akfs = tdt.actionKeyframes;
+  if (!akfs) {
+    return { action: normalizeTdtActionName(tdt.action), startFrame: 0, freeze: false };
+  }
+  const frames = Object.keys(akfs).map(Number).sort((a, b) => a - b);
+  let chosenFrame = -1;
+  for (const f of frames) {
+    if (f <= frame) chosenFrame = f;
+    else break;
+  }
+  if (chosenFrame >= 0) {
+    return {
+      action: normalizeTdtActionName(akfs[chosenFrame].action),
+      startFrame: chosenFrame,
+      freeze: Boolean(akfs[chosenFrame].freeze),
+    };
+  }
+  return { action: normalizeTdtActionName(tdt.action), startFrame: 0, freeze: false };
+}
+
 function evalMonotoneHermiteSegment(
   p1: number,
   p2: number,
@@ -326,22 +359,24 @@ function lerpColorHex(hexA?: string, hexB?: string, t = 0): string | undefined {
 export function resolveInterpolatedKeyframe(
   keyframes: Record<number, KeyframePosition>,
   frame: number,
-  defaultColor?: string
+  defaultColor?: string,
+  enableInterpolation = false
 ): KeyframePosition {
-  if (keyframes[frame]) return keyframes[frame];
+  const effFrame = enableInterpolation ? frame : Math.floor(frame + 1e-6);
+  if (keyframes[effFrame]) return keyframes[effFrame];
   const frames = Object.keys(keyframes).map(Number).sort((a, b) => a - b);
   if (frames.length === 0) return { x: 0, y: 0, z: 0, rotY: 0 };
-  if (frame <= frames[0]) return keyframes[frames[0]];
-  if (frame >= frames[frames.length - 1]) return keyframes[frames[frames.length - 1]];
+  if (effFrame <= frames[0]) return keyframes[frames[0]];
+  if (effFrame >= frames[frames.length - 1]) return keyframes[frames[frames.length - 1]];
 
   let i = 0;
-  while (i + 1 < frames.length && frames[i + 1] <= frame) i++;
+  while (i + 1 < frames.length && frames[i + 1] <= effFrame) i++;
   const f1 = frames[i];
   const f2 = frames[i + 1];
   const p1 = keyframes[f1];
   const p2 = keyframes[f2];
 
-  // Resolve inherited colors for color interpolation
+  // Resolve inherited colors for color state
   let c1 = p1.color;
   if (!c1) {
     for (let k = i - 1; k >= 0; k--) {
@@ -354,9 +389,9 @@ export function resolveInterpolatedKeyframe(
   }
   const c2 = p2.color || c1;
 
-  // Hidden segments or larger/farther movements snap cleanly with no interpolation
+  // When Interpolation is OFF, or for hidden segments / far jumps, hold p1 cleanly without tweening
   const dist = dist3D(p1, p2);
-  if (p1.visible === false || p2.visible === false || dist > INTERP_JUMP_THRESHOLD) {
+  if (!enableInterpolation || p1.visible === false || p2.visible === false || dist > INTERP_JUMP_THRESHOLD) {
     return c1 && p1.color !== c1 ? { ...p1, color: c1 } : p1;
   }
 
@@ -464,11 +499,45 @@ function distToSegment2D(px: number, py: number, ax: number, ay: number, bx: num
   return Math.hypot(px - (ax + t * abx), py - (ay + t * aby));
 }
 
-function computeScrollingTransform(evalFrame: number, startFrame: number): string {
-  const elapsed = Math.max(0, evalFrame - startFrame);
-  // Slow, constant 3DMM rolling credits pace independent of box duration (~0.85cqw per 6-FPS frame)
-  const scrollUpCqw = elapsed * 0.85;
-  return `translateY(calc(12% - ${scrollUpCqw.toFixed(2)}cqw))`;
+function computeScrollingTransform(
+  outerEl: HTMLDivElement | null,
+  innerEl: HTMLDivElement | null,
+  stageWidthPx: number,
+  scrollElapsedSec: number | undefined,
+  isPlayingNow: boolean,
+  isScrollHoldActive: boolean,
+  isCompleted: boolean
+): { transform: string; yPx: number; finished: boolean; hidden: boolean } {
+  const boxH = outerEl?.clientHeight || 220;
+  const contentH = innerEl?.offsetHeight || 0;
+  const speedPxPerSec = Math.max(14, stageWidthPx * 0.044);
+
+  if (isCompleted) {
+    const offY = -(Math.max(contentH, boxH) + 32);
+    return {
+      transform: `translate3d(0, ${offY.toFixed(1)}px, 0)`,
+      yPx: offY,
+      finished: true,
+      hidden: true,
+    };
+  }
+
+  let yPx: number;
+  if (isPlayingNow && isScrollHoldActive) {
+    const elapsed = Math.max(0, scrollElapsedSec ?? 0);
+    yPx = boxH * 0.78 - elapsed * speedPxPerSec;
+  } else {
+    // Paused / scrubbing / static preview: hold cleanly visible inside box without re-scrolling across frames
+    yPx = Math.min(boxH * 0.52, Math.max(4, boxH - Math.min(contentH || 40, boxH * 0.48) - 6));
+  }
+
+  const finished = isPlayingNow && isScrollHoldActive && contentH > 0 && yPx + contentH <= -6;
+  return {
+    transform: `translate3d(0, ${yPx.toFixed(1)}px, 0)`,
+    yPx,
+    finished,
+    hidden: finished,
+  };
 }
 
 export const Viewport3D: React.FC<Viewport3DProps> = ({
@@ -479,6 +548,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   currentFrame,
   renderFrame,
   isPlaying = false,
+  enableInterpolation = false,
+  enableShading = false,
   livePlayheadRef,
   selectedEntityId,
   onSelectEntity,
@@ -513,7 +584,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   const propRigsRef = useRef<Map<string, TemplateRig>>(new Map());
   const tdtGroupsRef = useRef<Map<string, THREE.Group>>(new Map());
   const activeActionsRef = useRef<Map<string, ParsedAction>>(new Map());
+  const textBoxOuterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const textBoxInnerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const stageBoxSizeRef = useRef(stageBoxSize);
+  stageBoxSizeRef.current = stageBoxSize;
 
   const actorsGroupRef = useRef<THREE.Group>(new THREE.Group());
   const propsGroupRef = useRef<THREE.Group>(new THREE.Group());
@@ -549,6 +623,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   sceneIndexRef.current = sceneIndex;
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
+  const enableInterpolationRef = useRef(enableInterpolation);
+  enableInterpolationRef.current = enableInterpolation;
+  const enableShadingRef = useRef(enableShading);
+  enableShadingRef.current = enableShading;
   const livePlayheadPropRef = useRef(livePlayheadRef);
   livePlayheadPropRef.current = livePlayheadRef;
   const applyStageAtFrameRef = useRef<(evalFrame: number) => void>(() => {});
@@ -656,7 +734,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     renderer.setSize(width, height);
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.enabled = enableShadingRef.current;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.domElement.style.touchAction = 'none';
     renderer.domElement.style.width = '100%';
@@ -995,7 +1073,15 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     let cancelled = false;
     setLoadingStage(true);
 
-    loadBackgroundView(sceneData.bkgdCno, activeCam.icam)
+    (async () => {
+      try {
+        return await loadBackgroundView(sceneData.bkgdCno, activeCam.icam);
+      } catch {
+        await new Promise((r) => setTimeout(r, 250));
+        if (cancelled) throw new Error('cancelled');
+        return await loadBackgroundView(sceneData.bkgdCno, activeCam.icam);
+      }
+    })()
       .then((bgView) => {
         if (cancelled) return;
         bgViewRef.current = bgView;
@@ -1027,12 +1113,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           );
           floorShadowMatRef.current.uniforms.uZbmp.value = bgView.zbmpDepthTexture;
           floorShadowMatRef.current.uniforms.uInvViewProj.value.copy(vp).invert();
-          floorShadowMeshRef.current.visible = Boolean(bgView.zbmpDepthTexture);
+          floorShadowMeshRef.current.visible =
+            enableShadingRef.current && Boolean(bgView.zbmpDepthTexture);
         }
 
         if (shadowPlaneRef.current) {
           shadowPlaneRef.current.position.copy(bgView.stageOrigin);
-          shadowPlaneRef.current.visible = !bgView.zbmpDepthTexture;
+          shadowPlaneRef.current.visible =
+            enableShadingRef.current && !bgView.zbmpDepthTexture;
         }
 
         // Aim directional shadow frustum cleanly around the active stage origin
@@ -1073,8 +1161,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         setSyncVersion((v) => v + 1);
       })
       .catch((err) => {
-        console.error('Failed loading BKGD/CAM view:', err);
-        setLoadingStage(false);
+        if (!cancelled) {
+          console.error('Failed loading BKGD/CAM view:', err);
+          setLoadingStage(false);
+        }
       });
 
     return () => {
@@ -1099,49 +1189,56 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
     Promise.all(
       sceneData.actors.map(async (actor) => {
-        let rig = existing.get(actor.id);
-        if (rig && rig.template.tmplCno !== actor.tmplCno) {
-          group.remove(rig.root);
-          disposeRig(rig.root);
-          existing.delete(actor.id);
-          rig = undefined;
-        }
-        const costumeKey = JSON.stringify({
-          c: actor.costumeCmids || [],
-          m: actor.costumeMtrls || [],
-        });
-        if (!rig) {
-          const tmpl = await loadTemplate(actor.tmplCno);
-          if (cancelled) return;
-          rig = instantiateTemplateRig(tmpl, actor.costumeCmids, actor.costumeMtrls);
-          rig.root.userData = {
-            id: actor.id,
-            type: 'actor',
-            tmplCno: actor.tmplCno,
-            appliedCostumeKey: costumeKey,
-          };
-          group.add(rig.root);
-          existing.set(actor.id, rig);
-        } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
-          rig.root.userData.appliedCostumeKey = costumeKey;
-          applyCostumeToRig(rig, actor.costumeCmids || [], actor.costumeMtrls);
-        }
+        try {
+          let rig = existing.get(actor.id);
+          if (rig && rig.template.tmplCno !== actor.tmplCno) {
+            group.remove(rig.root);
+            disposeRig(rig.root);
+            existing.delete(actor.id);
+            rig = undefined;
+          }
+          const costumeKey = JSON.stringify({
+            c: actor.costumeCmids || [],
+            m: actor.costumeMtrls || [],
+          });
+          if (!rig) {
+            const tmpl = await loadTemplate(actor.tmplCno);
+            if (cancelled) return;
+            rig = instantiateTemplateRig(tmpl, actor.costumeCmids, actor.costumeMtrls);
+            rig.root.userData = {
+              id: actor.id,
+              type: 'actor',
+              tmplCno: actor.tmplCno,
+              appliedCostumeKey: costumeKey,
+              enableShading: enableShadingRef.current,
+            };
+            applyObjectShadingMode(rig.root, enableShadingRef.current);
+            group.add(rig.root);
+            existing.set(actor.id, rig);
+          } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
+            rig.root.userData.appliedCostumeKey = costumeKey;
+            applyCostumeToRig(rig, actor.costumeCmids || [], actor.costumeMtrls);
+            applyObjectShadingMode(rig.root, enableShadingRef.current);
+          }
 
-        const neededAnids = new Set<number>([actor.anid]);
-        if (actor.actionKeyframes) {
-          Object.values(actor.actionKeyframes).forEach((k) => neededAnids.add(k.anid));
-        }
-        await Promise.all(
-          Array.from(neededAnids).map(async (anid) => {
-            const key = `${actor.id}:${anid}`;
-            if (!activeActionsRef.current.has(key)) {
-              const act = await loadAction(rig!.template, anid);
-              if (!cancelled && act) {
-                activeActionsRef.current.set(key, act);
+          const neededAnids = new Set<number>([actor.anid]);
+          if (actor.actionKeyframes) {
+            Object.values(actor.actionKeyframes).forEach((k) => neededAnids.add(k.anid));
+          }
+          await Promise.all(
+            Array.from(neededAnids).map(async (anid) => {
+              const key = `${actor.id}:${anid}`;
+              if (!activeActionsRef.current.has(key)) {
+                const act = await loadAction(rig!.template, anid);
+                if (!cancelled && act) {
+                  activeActionsRef.current.set(key, act);
+                }
               }
-            }
-          })
-        );
+            })
+          );
+        } catch (err) {
+          console.warn(`Failed loading actor ${actor.name}:`, err);
+        }
       })
     ).then(() => {
       if (!cancelled) setSyncVersion((v) => v + 1);
@@ -1169,62 +1266,69 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
     Promise.all(
       sceneData.props.map(async (prop) => {
-        let rig = existing.get(prop.id);
-        if (rig && rig.template.tmplCno !== prop.tmplCno) {
-          group.remove(rig.root);
-          disposeRig(rig.root);
-          existing.delete(prop.id);
-          rig = undefined;
-        }
-        const costumeKey = JSON.stringify({
-          c: prop.costumeCmids || [],
-          m: prop.costumeMtrls || [],
-        });
-        if (!rig) {
-          const tmpl = await loadTemplate(prop.tmplCno);
-          if (cancelled) return;
-          rig = instantiateTemplateRig(tmpl, prop.costumeCmids, prop.costumeMtrls);
-          rig.root.userData = {
-            id: prop.id,
-            type: 'prop',
-            tmplCno: prop.tmplCno,
-            appliedCostumeKey: costumeKey,
-          };
-          group.add(rig.root);
-          existing.set(prop.id, rig);
-        } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
-          rig.root.userData.appliedCostumeKey = costumeKey;
-          applyCostumeToRig(rig, prop.costumeCmids || [], prop.costumeMtrls);
-        }
-
-        const tmpl = rig.template;
-        const neededAnids = new Set<number>([prop.anid ?? tmpl.actions[0]?.anid ?? 0]);
-        const matchByName = (name?: string) => {
-          if (!name) return undefined;
-          const norm = name.trim().toLowerCase();
-          return tmpl.actions.find((a) => a.name.trim().toLowerCase() === norm)?.anid;
-        };
-        const m0 = matchByName(prop.action);
-        if (m0 !== undefined) neededAnids.add(m0);
-        if (prop.actionKeyframes) {
-          Object.values(prop.actionKeyframes).forEach((k) => {
-            if (k.anid !== undefined) neededAnids.add(k.anid);
-            const mk = matchByName(k.action);
-            if (mk !== undefined) neededAnids.add(mk);
+        try {
+          let rig = existing.get(prop.id);
+          if (rig && rig.template.tmplCno !== prop.tmplCno) {
+            group.remove(rig.root);
+            disposeRig(rig.root);
+            existing.delete(prop.id);
+            rig = undefined;
+          }
+          const costumeKey = JSON.stringify({
+            c: prop.costumeCmids || [],
+            m: prop.costumeMtrls || [],
           });
-        }
+          if (!rig) {
+            const tmpl = await loadTemplate(prop.tmplCno);
+            if (cancelled) return;
+            rig = instantiateTemplateRig(tmpl, prop.costumeCmids, prop.costumeMtrls);
+            rig.root.userData = {
+              id: prop.id,
+              type: 'prop',
+              tmplCno: prop.tmplCno,
+              appliedCostumeKey: costumeKey,
+              enableShading: enableShadingRef.current,
+            };
+            applyObjectShadingMode(rig.root, enableShadingRef.current);
+            group.add(rig.root);
+            existing.set(prop.id, rig);
+          } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
+            rig.root.userData.appliedCostumeKey = costumeKey;
+            applyCostumeToRig(rig, prop.costumeCmids || [], prop.costumeMtrls);
+            applyObjectShadingMode(rig.root, enableShadingRef.current);
+          }
 
-        await Promise.all(
-          Array.from(neededAnids).map(async (anid) => {
-            const key = `${prop.id}:${anid}`;
-            if (!activeActionsRef.current.has(key)) {
-              const act = await loadAction(tmpl, anid);
-              if (!cancelled && act) {
-                activeActionsRef.current.set(key, act);
+          const tmpl = rig.template;
+          const neededAnids = new Set<number>([prop.anid ?? tmpl.actions[0]?.anid ?? 0]);
+          const matchByName = (name?: string) => {
+            if (!name) return undefined;
+            const norm = name.trim().toLowerCase();
+            return tmpl.actions.find((a) => a.name.trim().toLowerCase() === norm)?.anid;
+          };
+          const m0 = matchByName(prop.action);
+          if (m0 !== undefined) neededAnids.add(m0);
+          if (prop.actionKeyframes) {
+            Object.values(prop.actionKeyframes).forEach((k) => {
+              if (k.anid !== undefined) neededAnids.add(k.anid);
+              const mk = matchByName(k.action);
+              if (mk !== undefined) neededAnids.add(mk);
+            });
+          }
+
+          await Promise.all(
+            Array.from(neededAnids).map(async (anid) => {
+              const key = `${prop.id}:${anid}`;
+              if (!activeActionsRef.current.has(key)) {
+                const act = await loadAction(tmpl, anid);
+                if (!cancelled && act) {
+                  activeActionsRef.current.set(key, act);
+                }
               }
-            }
-          })
-        );
+            })
+          );
+        } catch (err) {
+          console.warn(`Failed loading prop ${prop.name}:`, err);
+        }
       })
     ).then(() => {
       if (!cancelled) setSyncVersion((v) => v + 1);
@@ -1252,22 +1356,27 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
     Promise.all(
       tdts.map(async (tdt) => {
-        const specKey = `${tdt.text}|${tdt.tdfCno}|${tdt.tdts}|${tdt.mtrlCno ?? ''}`;
-        const prev = existing.get(tdt.id);
-        if (prev && prev.userData.specKey === specKey) return;
-        const grp = await buildTdtTextGroup(tdt.text, tdt.tdfCno, tdt.tdts, tdt.mtrlCno);
-        if (cancelled) return;
-        if (prev) {
-          container.remove(prev);
+        try {
+          const specKey = `${tdt.text}|${tdt.tdfCno}|${tdt.tdts}|${tdt.mtrlCno ?? ''}`;
+          const prev = existing.get(tdt.id);
+          if (prev && prev.userData.specKey === specKey) return;
+          const grp = await buildTdtTextGroup(tdt.text, tdt.tdfCno, tdt.tdts, tdt.mtrlCno);
+          if (cancelled) return;
+          if (prev) {
+            container.remove(prev);
+          }
+          grp.userData = {
+            id: tdt.id,
+            type: 'tdt' as StageEntityType,
+            specKey,
+            baseColor: grp.userData.baseColor,
+          };
+          applyObjectShadingMode(grp, enableShadingRef.current);
+          container.add(grp);
+          existing.set(tdt.id, grp);
+        } catch (err) {
+          console.warn(`Failed building 3D word ${tdt.text}:`, err);
         }
-        grp.userData = {
-          id: tdt.id,
-          type: 'tdt' as StageEntityType,
-          specKey,
-          baseColor: grp.userData.baseColor,
-        };
-        container.add(grp);
-        existing.set(tdt.id, grp);
       })
     ).then(() => {
       if (!cancelled) setSyncVersion((v) => v + 1);
@@ -1278,16 +1387,37 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     };
   }, [sceneData.tdtTexts]);
 
-  // Evaluate continuous stage pose, blend cels, transforms, 3D text & scrolling 2D text at any subframe
+  // Apply Shading ON / OFF cleanly across all loaded rigs, 3D words, and ZBMP floor shadows
+  useEffect(() => {
+    if (rendererRef.current) {
+      rendererRef.current.shadowMap.enabled = enableShading;
+    }
+    if (floorShadowMeshRef.current) {
+      floorShadowMeshRef.current.visible =
+        enableShading && Boolean(bgViewRef.current?.zbmpDepthTexture);
+    }
+    if (shadowPlaneRef.current) {
+      shadowPlaneRef.current.visible =
+        enableShading && !bgViewRef.current?.zbmpDepthTexture;
+    }
+    applyObjectShadingMode(actorsGroupRef.current, enableShading);
+    applyObjectShadingMode(propsGroupRef.current, enableShading);
+    applyObjectShadingMode(tdtContainerRef.current, enableShading);
+    setSyncVersion((v) => v + 1);
+  }, [enableShading]);
+
+  // Evaluate stage pose, cels, transforms, 3D text animations & scrolling 2D text at any frame
   applyStageAtFrameRef.current = (evalFrame: number) => {
     const curScene = sceneDataRef.current;
     const bgView = bgViewRef.current;
+    const interp = enableInterpolationRef.current;
+    const stageFrame = interp ? evalFrame : Math.floor(evalFrame + 1e-6);
 
     curScene.actors.forEach((actor) => {
       const rig = actorRigsRef.current.get(actor.id);
       if (!rig) return;
 
-      const resolvedAct = resolveActorActionAtFrame(actor, evalFrame);
+      const resolvedAct = resolveActorActionAtFrame(actor, stageFrame);
       const parsedAction =
         activeActionsRef.current.get(`${actor.id}:${resolvedAct.anid}`) ||
         rig.template.actionCache.get(resolvedAct.anid) ||
@@ -1296,11 +1426,15 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       if (parsedAction) {
         const localCelFrame = resolvedAct.freeze
           ? resolvedAct.celOffset
-          : resolvedAct.celOffset + Math.max(0, evalFrame - resolvedAct.startFrame);
-        applyActionCelBlendedToRig(rig, parsedAction, localCelFrame);
+          : resolvedAct.celOffset + Math.max(0, stageFrame - resolvedAct.startFrame);
+        if (interp) {
+          applyActionCelBlendedToRig(rig, parsedAction, localCelFrame);
+        } else {
+          applyActionCelToRig(rig, parsedAction, localCelFrame);
+        }
       }
 
-      const pos = resolveInterpolatedKeyframe(actor.keyframes, evalFrame);
+      const pos = resolveInterpolatedKeyframe(actor.keyframes, stageFrame, undefined, interp);
       const sx = pos.scaleX ?? 1;
       const sy = pos.scaleY ?? 1;
       const sz = pos.scaleZ ?? 1;
@@ -1329,10 +1463,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       const rig = propRigsRef.current.get(prop.id);
       if (!rig) return;
 
-      const resolvedPropAct = resolvePropActionAtFrame(prop, evalFrame);
+      const resolvedPropAct = resolvePropActionAtFrame(prop, stageFrame);
       const localPropFrame = resolvedPropAct.freeze
         ? resolvedPropAct.celOffset
-        : resolvedPropAct.celOffset + Math.max(0, evalFrame - resolvedPropAct.startFrame);
+        : resolvedPropAct.celOffset + Math.max(0, stageFrame - resolvedPropAct.startFrame);
 
       // Prefer real 3DMM TMPL ACTN (e.g. Explosion "Bang!" / "Grow Fast", Rocket "Fly", Chest "Open and Close")
       const actNorm = resolvedPropAct.action.trim().toLowerCase();
@@ -1346,14 +1480,18 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         rig.template.actionCache.get(targetAnid) ||
         rig.template.actionCache.get(0);
 
-      const pos = resolveInterpolatedKeyframe(prop.keyframes, evalFrame);
+      const pos = resolveInterpolatedKeyframe(prop.keyframes, stageFrame, undefined, interp);
       const sx = pos.scaleX ?? 1;
       const sy = pos.scaleY ?? 1;
       const sz = pos.scaleZ ?? 1;
       applyRigColorOverride(rig, pos.color);
 
       if (parsedPropActn) {
-        applyActionCelBlendedToRig(rig, parsedPropActn, localPropFrame);
+        if (interp) {
+          applyActionCelBlendedToRig(rig, parsedPropActn, localPropFrame);
+        } else {
+          applyActionCelToRig(rig, parsedPropActn, localPropFrame);
+        }
       }
 
       if (isDraggingRef.current && dragEntityIdRef.current === prop.id) {
@@ -1407,15 +1545,34 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       const grp = tdtGroupsRef.current.get(tdt.id);
       if (!grp) return;
       const baseHex = (grp.userData.baseColor as string) || '#f59e0b';
-      const pos = resolveInterpolatedKeyframe(tdt.keyframes, evalFrame, baseHex);
+      const pos = resolveInterpolatedKeyframe(tdt.keyframes, stageFrame, baseHex, interp);
       applyGroupColorOverride(grp, pos.color);
+
+      const resolvedTdtAct = resolveTdtActionAtFrame(tdt, stageFrame);
+      const localTdtFrame = resolvedTdtAct.freeze
+        ? 0
+        : Math.max(0, stageFrame - resolvedTdtAct.startFrame);
+      const sx = pos.scaleX ?? 1;
+      const sy = pos.scaleY ?? 1;
+      const sz = pos.scaleZ ?? 1;
 
       if (isDraggingRef.current && dragEntityIdRef.current === tdt.id) {
         grp.visible = true;
         const { x, y, z, rotX, rotY, rotZ } = dragLiveWorldPosRef.current;
-        grp.position.set(x, y, z);
-        grp.rotation.set(rotX, rotY, rotZ, 'YXZ');
-        grp.scale.set(pos.scaleX ?? 1, pos.scaleY ?? 1, pos.scaleZ ?? 1);
+        _worldPosTmp.set(x, y, z);
+        applyTdtActionTransform(
+          grp,
+          resolvedTdtAct.action,
+          localTdtFrame,
+          curScene.totalFrames,
+          sx,
+          sy,
+          sz,
+          rotX,
+          rotY,
+          rotZ,
+          _worldPosTmp
+        );
         if (yellowOutlineBoxRef.current?.visible) {
           yellowOutlineBoxRef.current.position.copy(grp.position).add(boxOffsetRef.current);
         }
@@ -1424,17 +1581,49 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
       grp.visible = pos.visible !== false;
       const worldRotY = storageToWorld(curScene, bgView, pos, _worldPosTmp);
-      grp.position.copy(_worldPosTmp);
-      grp.rotation.set(pos.rotX || 0, worldRotY, pos.rotZ || 0, 'YXZ');
-      grp.scale.set(pos.scaleX ?? 1, pos.scaleY ?? 1, pos.scaleZ ?? 1);
+      applyTdtActionTransform(
+        grp,
+        resolvedTdtAct.action,
+        localTdtFrame,
+        curScene.totalFrames,
+        sx,
+        sy,
+        sz,
+        pos.rotX || 0,
+        worldRotY,
+        pos.rotZ || 0,
+        _worldPosTmp
+      );
     });
 
-    // Update scrolling 2D text boxes smoothly at authentic slow 3DMM speed
+    // Update scrolling 2D text boxes smoothly while frame-hold scrolling is active
+    const live = livePlayheadPropRef.current?.current;
+    const isScrollHold = Boolean(isPlayingRef.current && live?.scrollHoldActive);
+    const liveScrollElapsed = live?.scrollElapsedSec;
     (curScene.textBoxes || []).forEach((tb) => {
       if (!tb.isScrolling) return;
-      const el = textBoxInnerRefs.current.get(tb.id);
-      if (!el) return;
-      el.style.transform = computeScrollingTransform(evalFrame, tb.startFrame);
+      const innerEl = textBoxInnerRefs.current.get(tb.id) || null;
+      const outerEl = textBoxOuterRefs.current.get(tb.id) || null;
+      if (!innerEl) return;
+      const activeForFrame = stageFrame >= tb.startFrame && stageFrame <= tb.endFrame;
+      if (!activeForFrame) return;
+
+      const isCompleted = Boolean(live?.completedScrollIds?.[tb.id]);
+      const res = computeScrollingTransform(
+        outerEl,
+        innerEl,
+        stageBoxSizeRef.current.w,
+        liveScrollElapsed,
+        isPlayingRef.current,
+        isScrollHold,
+        isCompleted
+      );
+      innerEl.style.transform = res.transform;
+      innerEl.style.opacity = res.hidden ? '0' : '1';
+      if (isScrollHold && live && res.finished) {
+        if (!live.completedScrollIds) live.completedScrollIds = {};
+        live.completedScrollIds[tb.id] = true;
+      }
     });
   };
 
@@ -1446,7 +1635,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         ? live.renderFrame
         : (renderFrame ?? currentFrame);
     applyStageAtFrameRef.current(evalFrame);
-  }, [currentFrame, renderFrame, isPlaying, sceneIndex, sceneData, syncVersion]);
+  }, [currentFrame, renderFrame, isPlaying, enableInterpolation, sceneIndex, sceneData, syncVersion]);
 
   // Update trail dots around selected actor/prop/3D text only on integer frame / selection / keyframe changes
   useEffect(() => {
@@ -1893,10 +2082,17 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     }
   };
 
-  const scrollEvalFrame = renderFrame ?? currentFrame;
-  const activeTextBoxes = (sceneData.textBoxes || []).filter(
-    (tb) => scrollEvalFrame >= tb.startFrame && scrollEvalFrame <= tb.endFrame
-  );
+  const liveForText = livePlayheadPropRef.current?.current;
+  const scrollEvalFrame = isPlaying
+    ? (liveForText && liveForText.sceneIndex === sceneIndex ? liveForText.frame : currentFrame)
+    : (enableInterpolation
+        ? (renderFrame ?? currentFrame)
+        : Math.floor((renderFrame ?? currentFrame) + 1e-6));
+  const activeTextBoxes = (sceneData.textBoxes || []).filter((tb) => {
+    if (scrollEvalFrame < tb.startFrame || scrollEvalFrame > tb.endFrame) return false;
+    if (tb.isScrolling && isPlaying && liveForText?.completedScrollIds?.[tb.id]) return false;
+    return true;
+  });
 
   return (
     <div
@@ -1922,7 +2118,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           />
         )}
 
-        {/* Smooth-Shaded WebGL Layer + ZBMP Depth Occlusion + ZBMP Floor Shadow + TDT 3D Text */}
+        {/* WebGL Layer + ZBMP Depth Occlusion + Optional Floor Shadow + TDT 3D Text */}
         <div
           ref={mountRef}
           onPointerDown={handlePointerDown}
@@ -1948,11 +2144,30 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           const heightPct = Math.max(1, Math.min(100 - topPct, ((tb.bottom - tb.top) / 306) * 100));
           const fontSizeCqw = (((tb.fontSize ?? 14) * 1.18) / 544) * 100;
           const textColor = tb.color || '#f9f9f9';
+          const displayText = tb.isScrolling
+            ? tb.text.replace(/^(?:[ \t]*\r?\n)+/, '')
+            : tb.text;
+          const live = livePlayheadPropRef.current?.current;
+          const scrollRes = tb.isScrolling
+            ? computeScrollingTransform(
+                textBoxOuterRefs.current.get(tb.id) || null,
+                textBoxInnerRefs.current.get(tb.id) || null,
+                stageBoxSize.w,
+                live?.scrollElapsedSec,
+                isPlaying,
+                Boolean(isPlaying && live?.scrollHoldActive),
+                Boolean(live?.completedScrollIds?.[tb.id])
+              )
+            : undefined;
 
           return (
             <div
               key={tb.id}
-              className="absolute pointer-events-none overflow-hidden select-none"
+              ref={(el) => {
+                if (el) textBoxOuterRefs.current.set(tb.id, el);
+                else textBoxOuterRefs.current.delete(tb.id);
+              }}
+              className="absolute z-10 pointer-events-none overflow-hidden select-none"
               style={{
                 left: `${leftPct}%`,
                 top: `${topPct}%`,
@@ -1965,6 +2180,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 fontWeight: tb.bold ? 700 : 400,
                 fontStyle: tb.italic ? 'italic' : 'normal',
                 lineHeight: 1.24,
+                tabSize: 4,
                 color: textColor,
                 textShadow: tb.bgColor
                   ? undefined
@@ -1978,25 +2194,25 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 }}
                 className="whitespace-pre-wrap break-words"
                 style={
-                  tb.isScrolling
-                    ? { transform: computeScrollingTransform(scrollEvalFrame, tb.startFrame) }
+                  scrollRes
+                    ? { transform: scrollRes.transform, opacity: scrollRes.hidden ? 0 : 1 }
                     : undefined
                 }
               >
-                {tb.text}
+                {displayText}
               </div>
             </div>
           );
         })}
 
         {loadingStage && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/55 text-amber-300 font-bold text-sm pointer-events-none">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/55 text-amber-300 font-bold text-sm pointer-events-none">
             Loading 3DMM Stage "{sceneData.sceneName}"...
           </div>
         )}
 
         {webglError && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/75 p-4 text-center text-xs text-rose-200 pointer-events-none">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/75 p-4 text-center text-xs text-rose-200 pointer-events-none">
             <div className="studio-panel px-3 py-2 max-w-sm">
               WebGL unavailable: {webglError}
             </div>
@@ -2004,14 +2220,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         )}
 
         {isRecordingMovement && (
-          <div className="absolute top-8 left-1/2 -translate-x-1/2 bg-amber-400 text-slate-950 font-bold px-3 py-1 border-2 border-black shadow-lg flex items-center gap-2 pointer-events-none text-xs">
+          <div className="absolute top-8 left-1/2 -translate-x-1/2 z-20 bg-amber-400 text-slate-950 font-bold px-3 py-1 border-2 border-black shadow-lg flex items-center gap-2 pointer-events-none text-xs">
             <img src={assetUrl('3dmm/bmp/2RECDS.BMP')} alt="" className="w-4 h-4 image-rendering-pixelated" />
             <span>RECORDING (6 FPS): Drag entity to {rotateMode ? 'rotate' : 'move'}</span>
           </div>
         )}
 
         {/* Stage Info Badges, Rotate 3D & Up/Down Drag Toggles */}
-        <div className="absolute top-1.5 left-1.5 right-1.5 flex flex-wrap justify-between items-start pointer-events-none text-[10px] sm:text-[11px] font-bold gap-1">
+        <div className="absolute top-1.5 left-1.5 right-1.5 z-20 flex flex-wrap justify-between items-start pointer-events-none text-[10px] sm:text-[11px] font-bold gap-1">
           <span className="bg-[#1b0e36]/85 text-amber-200 px-1.5 sm:px-2 py-0.5 border border-[#8e63d6] truncate max-w-full">
             Scene {sceneIndex + 1}/{totalScenes}: {sceneData.sceneName} (View{' '}
             {activeViewNumber ?? activeCam.icam + 1})

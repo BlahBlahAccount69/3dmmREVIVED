@@ -479,7 +479,10 @@ class Sound3DMMManager {
       ]);
 
       return items;
-    })();
+    })().catch((err) => {
+      this.catalogPromise = null;
+      throw err;
+    });
 
     return this.catalogPromise;
   }
@@ -537,7 +540,10 @@ class Sound3DMMManager {
         const midsKid = snds.findKid(msndMeta, 'MIDS');
         if (!midsKid) return null;
         return await snds.readChunk('MIDS', midsKid.cno);
-      })();
+      })().catch((err) => {
+        this.msndMidsCache.delete(msndCno);
+        throw err;
+      });
       this.msndMidsCache.set(msndCno, p);
     }
     return p;
@@ -564,7 +570,10 @@ class Sound3DMMManager {
           if (!waveKid) return null;
           const bytes = await snds.readChunk('WAVE', waveKid.cno);
           return decodeWavBytesToAudioBuffer(ctx, bytes);
-        })();
+        })().catch((err) => {
+          this.msndBufferCache.delete(msndCno);
+          throw err;
+        });
         this.msndBufferCache.set(msndCno, bufPromise);
       }
       const buf = await bufPromise;

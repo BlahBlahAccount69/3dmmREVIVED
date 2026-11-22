@@ -15,10 +15,12 @@ import {
 import { ChunkyFile } from './chunkyParser';
 import { parseGG, parseGL, readBmat34ToMatrix4, readFixed16, readTagReversed } from './kauaiCodec';
 import {
+  anidToTdtAction,
   CatalogSceneItem,
   loadAction,
   loadTemplate,
   loadThreeDmmCatalog,
+  normalizeTdtActionName,
   ParsedAction,
 } from './threeDmmEngine';
 import { sound3DMM } from './soundLibrary';
@@ -274,6 +276,7 @@ export async function loadOfficial3mmMovie(
       const right = tbDv.getInt32(16, true);
       const top = tbDv.getInt32(20, true);
       const bottom = tbDv.getInt32(24, true);
+      const explicitScrollFlag = tbDv.getInt32(28, true);
       const fStory = tbDv.getInt32(32, true);
       const startFrame = Math.max(0, Math.min(totalFrames, tbFirst - nfrmFirst));
       const endFrame =
@@ -379,9 +382,16 @@ export async function loadOfficial3mmMovie(
         }
 
         if (textParts.length > 0) {
+          const joinedText = textParts.join('\n');
+          const isCreditsScroll =
+            explicitScrollFlag === 1 ||
+            (fStory === 0 &&
+              ((tbLast >= 2147483640 &&
+                (joinedText.includes('\n') || startFrame >= Math.max(0, totalFrames - 2))) ||
+                (joinedText.includes('\n') && bottom - top >= 48)));
           textBoxes.push({
             id: `tbox_${sIdx}_${tIdx}_${tbMeta.cno}`,
-            text: textParts.join('\n'),
+            text: joinedText,
             fontName,
             fontSize,
             color,
@@ -394,7 +404,7 @@ export async function loadOfficial3mmMovie(
             top,
             right,
             bottom,
-            isScrolling: fStory === 0,
+            isScrolling: isCreditsScroll,
           });
         }
       }
@@ -863,12 +873,54 @@ export async function loadOfficial3mmMovie(
 
       if (tdtSpec) {
         if (tdtSpec.text.length > 0) {
+          let tdtAction: string | undefined;
+          let tdtActionKeyframes: TdtTextEntity['actionKeyframes'];
+
+          const akEntries = Object.entries(actionKeyframes).sort(([a], [b]) => Number(a) - Number(b));
+          if (akEntries.length > 0) {
+            tdtActionKeyframes = {};
+            for (const [fk, av] of akEntries) {
+              tdtActionKeyframes[Number(fk)] = {
+                action: anidToTdtAction(av.anid),
+                ...(av.freeze ? { freeze: true } : {}),
+              };
+            }
+            tdtAction = tdtActionKeyframes[Number(akEntries[0][0])].action;
+          }
+
+          const tdtaKid = chunky.findKid(actrMeta, 'TDTA');
+          if (tdtaKid) {
+            try {
+              const tdtaBytes = await chunky.readChunk('TDTA', tdtaKid.cno);
+              const parsedTdta = JSON.parse(new TextDecoder().decode(tdtaBytes)) as {
+                action?: string;
+                actionKeyframes?: TdtTextEntity['actionKeyframes'];
+              };
+              if (parsedTdta.action) {
+                tdtAction = normalizeTdtActionName(parsedTdta.action);
+              }
+              if (parsedTdta.actionKeyframes) {
+                const normKfs: TdtTextEntity['actionKeyframes'] = {};
+                for (const [fk, av] of Object.entries(parsedTdta.actionKeyframes)) {
+                  normKfs[Number(fk)] = {
+                    action: normalizeTdtActionName(av.action),
+                    ...(av.freeze ? { freeze: true } : {}),
+                  };
+                }
+                tdtActionKeyframes = normKfs;
+              }
+            } catch {
+              // ignore malformed TDTA
+            }
+          }
           tdtTexts.push({
             id: `tdt_${sIdx}_${aIdx}_${tmplCno}`,
             text: tdtSpec.text,
             tdfCno: tdtSpec.tdfCno,
             tdts: tdtSpec.tdts,
             mtrlCno: costumeMtrls[0]?.mtrlCno,
+            ...(tdtAction ? { action: tdtAction } : {}),
+            ...(tdtActionKeyframes ? { actionKeyframes: tdtActionKeyframes } : {}),
             keyframes: sparseKeyframes,
           });
         }

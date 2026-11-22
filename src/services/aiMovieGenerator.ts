@@ -17,8 +17,10 @@ import {
   CatalogSceneItem,
   loadTdtMaterialSwatches,
   loadTemplate,
+  normalizeTdtActionName,
   ParsedTemplate,
   TDF_FONT_OPTIONS,
+  TDT_ACTIONS,
   TDT_SHAPE_OPTIONS,
   ThreeDmmCatalog,
 } from './threeDmmEngine';
@@ -60,6 +62,7 @@ interface AiMoviePlan {
       text: string;
       fontName?: string;
       shapeName?: string;
+      action?: string;
       colorHex?: string;
       startFrame?: number;
       endFrame?: number;
@@ -94,6 +97,21 @@ const COMMON_ACTOR_ACTIONS = [
   'Run Scared',
   'Sneak',
   'Crawl',
+  'Greet',
+  'Dance',
+  'Laugh',
+  'Jump',
+  'Karate Kick',
+  'Faint',
+  'Fall',
+  'Fly',
+  'Kneel',
+  'Mad, Sad',
+  'Sit, Talk, Stand',
+  'Spin',
+  'Think',
+  'Yell',
+  'Talk',
 ];
 
 const COMMON_PROP_ACTIONS = [
@@ -106,6 +124,12 @@ const COMMON_PROP_ACTIONS = [
   'Spin Fast',
   'Squash',
   'Stretch',
+];
+
+const SIGNATURE_SOUND_PATTERNS = [
+  /funny moment|happy end|triumph|danger|scare|tension|specter|quest|mystery|geist|bistro|villain/i,
+  /explosion|rocket launch|owl hoot|thunder|siren|chuckle|laugh|crash|scream|applause|footstep/i,
+  /surprise|oh no|hey|watch out|hurry|all right|yipee/i,
 ];
 
 function clamp(v: number, min: number, max: number): number {
@@ -148,7 +172,6 @@ function resolveTemplateAction(tmpl: ParsedTemplate, requestedName: string): { a
   const exact = actions.find((a) => a.name.trim().toLowerCase() === clean);
   if (exact) return exact;
 
-  // Match meaningful keyword overlap (e.g. "Wave", "Run Scared", "Fly", "Bang!", "Open and Close")
   const tokens = clean.split(/[^a-z0-9]+/).filter((t) => t.length >= 2);
   let best = actions[0];
   let bestScore = -1;
@@ -216,6 +239,28 @@ function rectForPlacement(placement?: string, isScrolling?: boolean) {
   return { left: 32, top: 224, right: 512, bottom: 294 };
 }
 
+function pickCuratedSounds(soundCatalog: CatalogSoundItem[]): CatalogSoundItem[] {
+  const pickCategory = (category: 'music' | 'sfx' | 'speech', pattern: RegExp, limit: number) => {
+    const pool = soundCatalog.filter((s) => s.category === category);
+    const prioritized = pool.filter((s) => pattern.test(s.name));
+    const merged: CatalogSoundItem[] = [];
+    const seen = new Set<number>();
+    for (const item of [...prioritized, ...pool]) {
+      if (seen.has(item.msndCno)) continue;
+      seen.add(item.msndCno);
+      merged.push(item);
+      if (merged.length >= limit) break;
+    }
+    return merged;
+  };
+
+  return [
+    ...pickCategory('music', SIGNATURE_SOUND_PATTERNS[0], 14),
+    ...pickCategory('sfx', SIGNATURE_SOUND_PATTERNS[1], 22),
+    ...pickCategory('speech', SIGNATURE_SOUND_PATTERNS[2], 12),
+  ];
+}
+
 export async function generateAiMovie(options: {
   prompt: string;
   catalog: ThreeDmmCatalog;
@@ -226,30 +271,24 @@ export async function generateAiMovie(options: {
     throw new Error('3D Movie Maker catalog is still loading. Please wait a moment and try again.');
   }
 
-  // Pick a diverse balanced slice of real 3DMM sounds (MIDI music, SFX, and speech) for the AI director
-  const midiSounds = soundCatalog.filter((s) => s.category === 'music').slice(0, 18);
-  const sfxSounds = soundCatalog.filter((s) => s.category === 'sfx').slice(0, 28);
-  const speechSounds = soundCatalog.filter((s) => s.category === 'speech').slice(0, 18);
-  const pickedSounds = [...midiSounds, ...sfxSounds, ...speechSounds];
+  const pickedSounds = pickCuratedSounds(soundCatalog);
+  const specialPropActions: Record<string, string[]> = {};
+  for (const p of catalog.props) {
+    if (/rocket/i.test(p.name)) specialPropActions[p.name] = ['Fly'];
+    else if (/coffin|safe|chest/i.test(p.name)) specialPropActions[p.name] = ['Open and Close'];
+    else if (/explosio/i.test(p.name)) specialPropActions[p.name] = ['Bang!', 'Grow Fast'];
+  }
 
   const catalogSummary = {
     scenes: catalog.scenes.map((s) => ({ name: s.name, viewCount: Math.max(1, s.views.length) })),
-    actors: catalog.actors.map((a) => ({
-      name: a.name,
-      actions: COMMON_ACTOR_ACTIONS,
-    })),
-    props: catalog.props.map((p) => {
-      const extra: string[] = [];
-      if (/rocket/i.test(p.name)) extra.push('Fly');
-      if (/coffin|safe|chest/i.test(p.name)) extra.push('Open and Close');
-      if (/explosio/i.test(p.name)) extra.push('Bang!', 'Grow Fast');
-      return {
-        name: p.name,
-        actions: extra.length > 0 ? [...extra, ...COMMON_PROP_ACTIONS] : COMMON_PROP_ACTIONS,
-      };
-    }),
+    actors: catalog.actors.map((a) => a.name),
+    commonActorActions: COMMON_ACTOR_ACTIONS,
+    props: catalog.props.map((p) => p.name),
+    commonPropActions: COMMON_PROP_ACTIONS,
+    specialPropActions,
     tdtFonts: TDF_FONT_OPTIONS.map((f) => f.name),
     tdtShapes: TDT_SHAPE_OPTIONS.map((s) => s.name),
+    tdtActions: [...TDT_ACTIONS],
     sounds: pickedSounds.map((s) => ({ name: s.name, category: s.category })),
   };
 
@@ -264,17 +303,77 @@ export async function generateAiMovie(options: {
     error?: string;
   };
   if (!res.ok || !payload.moviePlan) {
+    if (res.status === 404 || res.status === 405) {
+      throw new Error(
+        'AI Movie Generator requires the Node/Express backend server (unavailable on static GitHub Pages hosting).'
+      );
+    }
     throw new Error(payload.error || `AI Movie Generator request failed (${res.status}).`);
   }
 
   const plan = payload.moviePlan;
-  const swatches = await loadTdtMaterialSwatches().catch(() => []);
+  const rawScenes = plan.scenes || [];
+
+  // Parallel pre-hydration of TDT material swatches, unique TMPLS.3CN templates, and SNDS.3CN cues
+  const matchedActorsMap = new Map<string, CatalogActorItem>();
+  const matchedPropsMap = new Map<string, CatalogPropItem>();
+  const neededTmpls = new Set<number>();
+  const matchedSoundsMap = new Map<string, CatalogSoundItem>();
+  const neededMsnds = new Set<number>();
+
+  for (const sp of rawScenes) {
+    for (const ap of sp.actors || []) {
+      const catActor = findActorMatch(ap.name, catalog.actors);
+      matchedActorsMap.set(ap.name, catActor);
+      neededTmpls.add(catActor.tmplCno);
+    }
+    for (const pp of sp.props || []) {
+      const catProp = findPropMatch(pp.name, catalog.props);
+      matchedPropsMap.set(pp.name, catProp);
+      neededTmpls.add(catProp.tmplCno);
+    }
+    for (const ac of sp.audioCues || []) {
+      const cleanName = (ac.soundName || '').trim().toLowerCase();
+      if (!cleanName || matchedSoundsMap.has(cleanName)) continue;
+      const match =
+        soundCatalog.find((s) => s.name.toLowerCase() === cleanName) ||
+        soundCatalog.find((s) => s.name.toLowerCase().includes(cleanName) || cleanName.includes(s.name.toLowerCase()));
+      if (match) {
+        matchedSoundsMap.set(cleanName, match);
+        neededMsnds.add(match.msndCno);
+      }
+    }
+  }
+
+  const templateCache = new Map<number, ParsedTemplate>();
+  const soundCache = new Map<number, { audioData: string; midiData?: string; isMidi: boolean }>();
+
+  const [swatches] = await Promise.all([
+    loadTdtMaterialSwatches().catch(() => []),
+    ...Array.from(neededTmpls).map(async (tmplCno) => {
+      try {
+        const tmpl = await loadTemplate(tmplCno);
+        templateCache.set(tmplCno, tmpl);
+      } catch {
+        // ignore missing template cache miss
+      }
+    }),
+    ...Array.from(neededMsnds).map(async (msndCno) => {
+      try {
+        const extracted = await sound3DMM.extractMsndCueData(msndCno);
+        if (extracted) soundCache.set(msndCno, extracted);
+      } catch {
+        // ignore missing audio cache miss
+      }
+    }),
+  ]);
+
   const builtScenes: Scene[] = [];
 
-  for (let sIdx = 0; sIdx < (plan.scenes || []).length; sIdx++) {
-    const sp = plan.scenes[sIdx];
+  for (let sIdx = 0; sIdx < rawScenes.length; sIdx++) {
+    const sp = rawScenes[sIdx];
     const matchedBg = findSceneMatch(sp.sceneName, catalog.scenes);
-    const totalFrames = Math.round(clamp(sp.durationFrames || 60, 18, 240));
+    const totalFrames = Math.round(clamp(sp.durationFrames || 54, 12, 240));
     const views = matchedBg.views;
 
     // Resolve camera cuts using authentic CAM chids (CatalogCameraView.icam)
@@ -296,13 +395,8 @@ export async function generateAiMovie(options: {
     const actors: ActorEntity[] = [];
     for (let aIdx = 0; aIdx < (sp.actors || []).length; aIdx++) {
       const ap = sp.actors![aIdx];
-      const catActor = findActorMatch(ap.name, catalog.actors);
-      let tmpl: ParsedTemplate | null = null;
-      try {
-        tmpl = await loadTemplate(catActor.tmplCno);
-      } catch {
-        tmpl = null;
-      }
+      const catActor = matchedActorsMap.get(ap.name) || findActorMatch(ap.name, catalog.actors);
+      const tmpl = templateCache.get(catActor.tmplCno) || null;
 
       const akfs: Record<number, ActionKeyframe> = {};
       for (const seg of ap.actionSegments || []) {
@@ -333,20 +427,15 @@ export async function generateAiMovie(options: {
     const props: PropEntity[] = [];
     for (let pIdx = 0; pIdx < (sp.props || []).length; pIdx++) {
       const pp = sp.props![pIdx];
-      const catProp = findPropMatch(pp.name, catalog.props);
-      let tmpl: ParsedTemplate | null = null;
-      try {
-        tmpl = await loadTemplate(catProp.tmplCno);
-      } catch {
-        tmpl = null;
-      }
+      const catProp = matchedPropsMap.get(pp.name) || findPropMatch(pp.name, catalog.props);
+      const tmpl = templateCache.get(catProp.tmplCno) || null;
 
       const pakfs: Record<number, PropActionKeyframe> = {};
       for (const seg of pp.actionSegments || []) {
         const f = Math.round(clamp(seg.frame, 0, totalFrames));
         const resolved = tmpl
           ? resolveTemplateAction(tmpl, seg.actionName)
-          : { anid: undefined, name: seg.actionName || 'at rest' };
+          : { anid: undefined, name: seg.actionName || 'At Rest' };
         pakfs[f] = {
           action: resolved.name,
           ...(resolved.anid !== undefined ? { anid: resolved.anid } : {}),
@@ -367,7 +456,7 @@ export async function generateAiMovie(options: {
         action: pakfs[0].action,
         ...(pakfs[0].anid !== undefined ? { anid: pakfs[0].anid } : {}),
         actionKeyframes: pakfs,
-        keyframes: buildKeyframes(pp.keyframes, totalFrames, (pIdx % 2 === 0 ? -4.5 : 4.5), -2),
+        keyframes: buildKeyframes(pp.keyframes, totalFrames, pIdx % 2 === 0 ? -4.5 : 4.5, -2),
       });
     }
 
@@ -405,12 +494,17 @@ export async function generateAiMovie(options: {
       if (endF < totalFrames) {
         kfs[endF] = { ...basePos, visible: false };
       }
+      const matchedTdtAction = normalizeTdtActionName(tp.action);
       tdtTexts.push({
         id: `ai_tdt_${sIdx}_${tIdx}_${Math.random().toString(36).slice(2, 6)}`,
         text: textVal.slice(0, 28),
         tdfCno: font.tdfCno,
         tdts: shape.tdts,
         mtrlCno: swatches[tIdx % Math.max(1, swatches.length)]?.mtrlCno,
+        action: matchedTdtAction,
+        actionKeyframes: {
+          [startF]: { action: matchedTdtAction },
+        },
         keyframes: kfs,
       });
     }
@@ -445,23 +539,21 @@ export async function generateAiMovie(options: {
       });
     }
 
-    // Hydrate authentic SNDS.3CN WAV / MIDS sound cues
+    // Populate pre-hydrated SNDS.3CN WAV / MIDS sound cues
     const audios: ImportedAudioCue[] = [];
     const usedAudioKeys = new Set<string>();
     for (let aIdx = 0; aIdx < (sp.audioCues || []).length; aIdx++) {
       const ac = sp.audioCues![aIdx];
       const cleanName = (ac.soundName || '').trim().toLowerCase();
       if (!cleanName) continue;
-      const match =
-        soundCatalog.find((s) => s.name.toLowerCase() === cleanName) ||
-        soundCatalog.find((s) => s.name.toLowerCase().includes(cleanName) || cleanName.includes(s.name.toLowerCase()));
+      const match = matchedSoundsMap.get(cleanName);
       if (!match) continue;
       const f = Math.round(clamp(ac.frame ?? 0, 0, totalFrames));
       const key = `${f}:${match.category === 'music' ? 'midi' : match.msndCno}`;
       if (usedAudioKeys.has(key)) continue;
       usedAudioKeys.add(key);
 
-      const extracted = await sound3DMM.extractMsndCueData(match.msndCno).catch(() => null);
+      const extracted = soundCache.get(match.msndCno);
       if (!extracted) continue;
       audios.push({
         id: `ai_snd_${sIdx}_${aIdx}_${Math.random().toString(36).slice(2, 6)}`,

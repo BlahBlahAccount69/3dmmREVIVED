@@ -9,6 +9,7 @@ import {
   PropEntity,
   Scene,
   ScreenTextBox,
+  TdtAction,
   TdtTextEntity,
 } from './types/movie';
 import { createDefaultMovie, createEmptyScene } from './services/defaultMovie';
@@ -27,6 +28,7 @@ import { exportMovieTo3mmBytes } from './services/movie3mmWriter';
 import { CatalogSoundItem, sound3DMM } from './services/soundLibrary';
 import { generateAiMovie } from './services/aiMovieGenerator';
 import {
+  LivePlayheadState,
   resolveActiveCameraAtFrame,
   resolveInterpolatedKeyframe,
   StageEntityType,
@@ -38,7 +40,7 @@ import { ActorPropPanel } from './components/ActorPropPanel';
 import { TimelineBar } from './components/TimelineBar';
 import { AudioImportModal } from './components/AudioImportModal';
 import { assetUrl } from './utils/assetUrl';
-import { BookOpen, FilePlus, Film, FolderOpen, Save, Sparkles, X } from 'lucide-react';
+import { BookOpen, FilePlus, Film, FolderOpen, Save, Settings, Sparkles, X } from 'lucide-react';
 
 export default function App() {
   const [movie, setMovie] = useState<Movie>(createDefaultMovie);
@@ -60,6 +62,9 @@ export default function App() {
   const [moveUpDownMode, setMoveUpDownMode] = useState(false);
   const [rotateMode, setRotateMode] = useState(false);
   const [isRecordingMovement, setIsRecordingMovement] = useState(false);
+  const [enableInterpolation, setEnableInterpolation] = useState(false);
+  const [enableShading, setEnableShading] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [mobileTab, setMobileTab] = useState<'stage' | 'cast'>('stage');
   const [isAudioModalOpen, setIsAudioModalOpen] = useState(false);
   const [showSamplesModal, setShowSamplesModal] = useState(false);
@@ -86,15 +91,20 @@ export default function App() {
 
   const movieRef = useRef(movie);
   movieRef.current = movie;
-  const playheadRef = useRef({
+  const playheadRef = useRef<LivePlayheadState>({
     sceneIndex: currentSceneIndex,
     frame: currentFrame,
     renderFrame,
+    scrollHoldActive: false,
+    scrollElapsedSec: 0,
+    completedScrollIds: {},
   });
   if (!isPlaying) {
     playheadRef.current.sceneIndex = currentSceneIndex;
     playheadRef.current.frame = currentFrame;
     playheadRef.current.renderFrame = renderFrame;
+    playheadRef.current.scrollHoldActive = false;
+    playheadRef.current.scrollElapsedSec = 0;
   }
 
   // Load real 3DMM Catalog & preload scenes, views, templates, sound catalog, UI WAVs, and MS GS Wavetable SoundFont
@@ -155,15 +165,63 @@ export default function App() {
         if (sceneIndex < 0 || sceneIndex >= scenes.length) sceneIndex = 0;
 
         const activeScene = scenes[sceneIndex];
+        const completedMap =
+          playheadRef.current.completedScrollIds ||
+          (playheadRef.current.completedScrollIds = {});
+        const activeScrollingAtFrame = (sc: Scene, f: number) =>
+          (sc.textBoxes || []).filter(
+            (tb) => tb.isScrolling && f >= tb.startFrame && f <= tb.endFrame && !completedMap[tb.id]
+          );
+
+        const holdingBoxes = activeScrollingAtFrame(activeScene, intFrame);
+        if (holdingBoxes.length > 0) {
+          const nextElapsed = (playheadRef.current.scrollElapsedSec || 0) + dt;
+          if (nextElapsed >= 45) {
+            for (const tb of holdingBoxes) completedMap[tb.id] = true;
+            playheadRef.current.scrollHoldActive = false;
+            playheadRef.current.scrollElapsedSec = 0;
+          } else {
+            playheadRef.current.scrollHoldActive = true;
+            playheadRef.current.scrollElapsedSec = nextElapsed;
+            playheadRef.current.frame = intFrame;
+            playheadRef.current.renderFrame = intFrame;
+            rafId = window.requestAnimationFrame(step);
+            return;
+          }
+        }
+
+        playheadRef.current.scrollHoldActive = false;
+        playheadRef.current.scrollElapsedSec = 0;
+
         let nextRender = subFrame + dt * 6.0;
         let nextIntFrame = Math.floor(nextRender + 1e-6);
         let nextSceneIndex = sceneIndex;
+
+        // If crossing into a frame that introduces an uncompleted scrolling credits box,
+        // land cleanly on that frame so scrolling credits render and freeze that frame until finished.
+        if (nextIntFrame > intFrame) {
+          const maxCheck = Math.min(nextIntFrame, activeScene.totalFrames);
+          for (let fCheck = intFrame + 1; fCheck <= maxCheck; fCheck++) {
+            const incoming = activeScrollingAtFrame(activeScene, fCheck);
+            if (incoming.length > 0) {
+              nextIntFrame = fCheck;
+              nextRender = fCheck;
+              playheadRef.current.scrollHoldActive = true;
+              playheadRef.current.scrollElapsedSec = 0;
+              break;
+            }
+          }
+        }
 
         if (nextIntFrame > activeScene.totalFrames) {
           if (sceneIndex + 1 < scenes.length) {
             nextSceneIndex = sceneIndex + 1;
             nextRender = 0;
             nextIntFrame = 0;
+            playheadRef.current.completedScrollIds = {};
+            playheadRef.current.scrollElapsedSec = 0;
+            playheadRef.current.scrollHoldActive =
+              activeScrollingAtFrame(scenes[nextSceneIndex], 0).length > 0;
             // Stop looping SFX at scene cuts while preserving background music continuity
             sound3DMM.stopLoopingSfx();
           } else {
@@ -173,6 +231,9 @@ export default function App() {
               sceneIndex,
               frame: endFrame,
               renderFrame: endFrame,
+              scrollHoldActive: false,
+              scrollElapsedSec: 0,
+              completedScrollIds: {},
             };
             sound3DMM.stopAll();
             setCurrentFrame(endFrame);
@@ -197,6 +258,7 @@ export default function App() {
 
         if (nextIntFrame !== intFrame || nextSceneIndex !== sceneIndex) {
           setCurrentFrame(nextIntFrame);
+          setRenderFrame(nextIntFrame);
           triggerAudiosForFrame(scenes[nextSceneIndex], nextIntFrame);
         }
       }
@@ -218,8 +280,14 @@ export default function App() {
         0,
         Math.min(maxF, Math.round(playheadRef.current.renderFrame))
       );
-      playheadRef.current.frame = stoppedFrame;
-      playheadRef.current.renderFrame = stoppedFrame;
+      playheadRef.current = {
+        sceneIndex: playheadRef.current.sceneIndex,
+        frame: stoppedFrame,
+        renderFrame: stoppedFrame,
+        scrollHoldActive: false,
+        scrollElapsedSec: 0,
+        completedScrollIds: {},
+      };
       setIsPlaying(false);
       setCurrentFrame(stoppedFrame);
       setRenderFrame(stoppedFrame);
@@ -237,10 +305,18 @@ export default function App() {
     }
     setCurrentFrame(startFrame);
     setRenderFrame(startFrame);
+    const hasScrollAtStart = Boolean(
+      startScene?.textBoxes?.some(
+        (tb) => tb.isScrolling && startFrame >= tb.startFrame && startFrame <= tb.endFrame
+      )
+    );
     playheadRef.current = {
       sceneIndex: startSceneIdx,
       frame: startFrame,
       renderFrame: startFrame,
+      scrollHoldActive: hasScrollAtStart,
+      scrollElapsedSec: 0,
+      completedScrollIds: {},
     };
     if (startFrame === 0 && startScene) {
       triggerAudiosForFrame(startScene, 0);
@@ -253,6 +329,17 @@ export default function App() {
     const clamped = Math.max(0, Math.min(currentScene.totalFrames, Math.round(frame)));
     playheadRef.current.frame = clamped;
     playheadRef.current.renderFrame = clamped;
+    playheadRef.current.scrollHoldActive = false;
+    playheadRef.current.scrollElapsedSec = 0;
+    // Allow re-triggering scrolling credits only if user rewound strictly before their startFrame
+    const prevCompleted = playheadRef.current.completedScrollIds || {};
+    const nextCompleted: Record<string, boolean> = {};
+    for (const tb of currentScene.textBoxes || []) {
+      if (tb.isScrolling && prevCompleted[tb.id] && clamped > tb.startFrame) {
+        nextCompleted[tb.id] = true;
+      }
+    }
+    playheadRef.current.completedScrollIds = nextCompleted;
     setCurrentFrame(clamped);
     setRenderFrame(clamped);
     triggerAudiosForFrame(currentScene, clamped);
@@ -273,7 +360,14 @@ export default function App() {
     setCurrentSceneIndex(0);
     setCurrentFrame(0);
     setRenderFrame(0);
-    playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+    playheadRef.current = {
+      sceneIndex: 0,
+      frame: 0,
+      renderFrame: 0,
+      scrollHoldActive: false,
+      scrollElapsedSec: 0,
+      completedScrollIds: {},
+    };
     setSelectedEntityId(null);
     setSelectedEntityType(null);
     setMobileTab('stage');
@@ -290,7 +384,14 @@ export default function App() {
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
       setRenderFrame(0);
-      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      playheadRef.current = {
+        sceneIndex: 0,
+        frame: 0,
+        renderFrame: 0,
+        scrollHoldActive: false,
+        scrollElapsedSec: 0,
+        completedScrollIds: {},
+      };
       setSelectedEntityId(null);
       setSelectedEntityType(null);
       setIsRecordingMovement(false);
@@ -322,7 +423,14 @@ export default function App() {
       setCurrentSceneIndex(currentSceneIndex + 1);
       setCurrentFrame(0);
       setRenderFrame(0);
-      playheadRef.current = { sceneIndex: currentSceneIndex + 1, frame: 0, renderFrame: 0 };
+      playheadRef.current = {
+        sceneIndex: currentSceneIndex + 1,
+        frame: 0,
+        renderFrame: 0,
+        scrollHoldActive: false,
+        scrollElapsedSec: 0,
+        completedScrollIds: {},
+      };
       setSelectedEntityId(null);
       setSelectedEntityType(null);
       setIsRecordingMovement(false);
@@ -506,6 +614,7 @@ export default function App() {
     tdts: number;
     mtrlCno?: number;
     color?: string;
+    action?: TdtAction | string;
   }) => {
     if (!currentScene) return;
     const slot =
@@ -513,12 +622,17 @@ export default function App() {
       currentScene.props.length +
       (currentScene.tdtTexts?.length || 0);
     const pos = computePlacementForCurrentView(slot);
+    const chosenAction = spec.action || 'At Rest';
     const newTdt: TdtTextEntity = {
       id: 'tdt_' + Math.random().toString(36).substring(2, 9),
       text: spec.text || 'HELLO',
       tdfCno: spec.tdfCno,
       tdts: spec.tdts,
       mtrlCno: spec.mtrlCno,
+      action: chosenAction,
+      actionKeyframes: {
+        [currentFrame]: { action: chosenAction },
+      },
       keyframes: {
         [currentFrame]: {
           ...pos,
@@ -536,7 +650,29 @@ export default function App() {
     setSelectedEntityId(newTdt.id);
     setSelectedEntityType('tdt');
     setMobileTab('stage');
-    setStatusMessage(`Added 3D Word "${newTdt.text}" at Frame ${currentFrame}.`);
+    setStatusMessage(`Added 3D Word "${newTdt.text}" (${chosenAction}) at Frame ${currentFrame}.`);
+  };
+
+  const handleUpdateTdtAction = (id: string, action: TdtAction | string) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    updated[currentSceneIndex] = {
+      ...currentScene,
+      tdtTexts: (currentScene.tdtTexts || []).map((t) => {
+        if (t.id !== id) return t;
+        const nextMap = {
+          ...(t.actionKeyframes || { 0: { action: t.action || 'At Rest' } }),
+          [currentFrame]: { action },
+        };
+        return {
+          ...t,
+          action: currentFrame === 0 ? action : (t.action || 'At Rest'),
+          actionKeyframes: nextMap,
+        };
+      }),
+    };
+    setMovie({ ...movie, scenes: updated });
+    setStatusMessage(`Set 3D Word animation "${action}" at Frame ${currentFrame}.`);
   };
 
   const handleUpdateTdtText = (
@@ -724,7 +860,7 @@ export default function App() {
       const sc = prev.scenes[idx];
       if (!sc) return prev;
       const truncate = (kfs: Record<number, KeyframePosition>) => {
-        const cur = resolveInterpolatedKeyframe(kfs, startFrame);
+        const cur = resolveInterpolatedKeyframe(kfs, startFrame, undefined, enableInterpolation);
         const out: Record<number, KeyframePosition> = {};
         Object.entries(kfs).forEach(([k, v]) => {
           if (Number(k) < startFrame) out[Number(k)] = v;
@@ -759,7 +895,7 @@ export default function App() {
       const sc = prev.scenes[idx];
       if (!sc) return prev;
       const write = (kfs: Record<number, KeyframePosition>) => {
-        const cur = resolveInterpolatedKeyframe(kfs, frame);
+        const cur = resolveInterpolatedKeyframe(kfs, frame, undefined, enableInterpolation);
         const out: Record<number, KeyframePosition> = {};
         Object.entries(kfs).forEach(([k, v]) => {
           if (Number(k) <= frame) out[Number(k)] = v;
@@ -786,6 +922,9 @@ export default function App() {
         sceneIndex: playheadRef.current.sceneIndex,
         frame,
         renderFrame: frame,
+        scrollHoldActive: false,
+        scrollElapsedSec: 0,
+        completedScrollIds: {},
       };
       setCurrentFrame(frame);
       setRenderFrame(frame);
@@ -807,7 +946,7 @@ export default function App() {
       const sc = prev.scenes[idx];
       if (!sc) return prev;
       const shift = (kfs: Record<number, KeyframePosition>) => {
-        const cur = resolveInterpolatedKeyframe(kfs, frame);
+        const cur = resolveInterpolatedKeyframe(kfs, frame, undefined, enableInterpolation);
         const out: Record<number, KeyframePosition> = {};
         Object.entries(kfs).forEach(([k, v]) => {
           const fn = Number(k);
@@ -872,7 +1011,12 @@ export default function App() {
 
       e.preventDefault();
       const dy = e.key === 'ArrowUp' ? 0.7 : -0.7;
-      const cur = resolveInterpolatedKeyframe(entity.keyframes, currentFrame);
+      const cur = resolveInterpolatedKeyframe(
+        entity.keyframes,
+        currentFrame,
+        undefined,
+        enableInterpolation
+      );
       handleMoveEntityAtFrame(
         selectedEntityId,
         selectedEntityType,
@@ -899,7 +1043,7 @@ export default function App() {
     if (!currentScene) return;
     const updated = [...movie.scenes];
     const patchColor = (kfs: Record<number, KeyframePosition>) => {
-      const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
+      const cur = resolveInterpolatedKeyframe(kfs, currentFrame, undefined, enableInterpolation);
       const entry: KeyframePosition = { ...cur };
       if (color) entry.color = color;
       else delete entry.color;
@@ -909,7 +1053,7 @@ export default function App() {
     setMovie({ ...movie, scenes: updated });
     setStatusMessage(
       color
-        ? `Set color ${color} at Frame ${currentFrame} (smoothly interpolates in 24 FPS playback!).`
+        ? `Set color ${color} at Frame ${currentFrame}.`
         : `Cleared keyframe color override at Frame ${currentFrame}.`
     );
   };
@@ -924,7 +1068,7 @@ export default function App() {
     if (!currentScene) return;
     const updated = [...movie.scenes];
     const patchRot = (kfs: Record<number, KeyframePosition>) => {
-      const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
+      const cur = resolveInterpolatedKeyframe(kfs, currentFrame, undefined, enableInterpolation);
       const next: KeyframePosition = {
         ...cur,
         rotY,
@@ -959,7 +1103,7 @@ export default function App() {
     const sz = Math.max(0.25, Math.min(3.5, scaleZ));
     const updated = [...movie.scenes];
     const patchKeyframes = (kfs: Record<number, KeyframePosition>) => {
-      const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
+      const cur = resolveInterpolatedKeyframe(kfs, currentFrame, undefined, enableInterpolation);
       return {
         ...kfs,
         [currentFrame]: {
@@ -990,7 +1134,7 @@ export default function App() {
     if (!currentScene) return;
     const updated = [...movie.scenes];
     const patchKeyframes = (kfs: Record<number, KeyframePosition>) => {
-      const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
+      const cur = resolveInterpolatedKeyframe(kfs, currentFrame, undefined, enableInterpolation);
       return {
         ...kfs,
         [currentFrame]: {
@@ -1013,13 +1157,13 @@ export default function App() {
     id: string,
     type: StageEntityType,
     targetFrame: number,
-    mode: 'pin' | 'showFrom'
+    mode: 'pin' | 'showFrom' | 'hideFrom'
   ) => {
     if (!currentScene) return;
     const tf = Math.max(0, Math.round(targetFrame));
     const updated = [...movie.scenes];
     const patchKeyframes = (kfs: Record<number, KeyframePosition>) => {
-      const cur = resolveInterpolatedKeyframe(kfs, currentFrame);
+      const cur = resolveInterpolatedKeyframe(kfs, currentFrame, undefined, enableInterpolation);
       const next = { ...kfs };
       if (mode === 'showFrom' && tf > 0) {
         if (!next[0]) {
@@ -1028,6 +1172,8 @@ export default function App() {
           next[0] = { ...next[0], visible: false };
         }
         next[tf] = { ...cur, visible: true };
+      } else if (mode === 'hideFrom') {
+        next[tf] = { ...cur, visible: false };
       } else {
         next[tf] = { ...cur, visible: cur.visible === false ? true : cur.visible };
       }
@@ -1048,9 +1194,29 @@ export default function App() {
     playheadRef.current.renderFrame = tf;
     setStatusMessage(
       mode === 'showFrom'
-        ? `Set ${type} to enter scene at Frame ${tf}.`
-        : `Pinned pose/position at Frame ${tf}.`
+        ? `Set ${type} to enter stage at Frame ${tf}.`
+        : mode === 'hideFrom'
+          ? `Set ${type} to exit/hide starting at Frame ${tf}.`
+          : `Pinned pose/position at Frame ${tf}.`
     );
+  };
+
+  const handleRemoveEntityKeyframe = (
+    id: string,
+    type: StageEntityType,
+    frame: number
+  ) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    const removeKey = (kfs: Record<number, KeyframePosition>) => {
+      if (Object.keys(kfs).length <= 1) return kfs;
+      const next = { ...kfs };
+      delete next[frame];
+      return next;
+    };
+    updated[currentSceneIndex] = patchSceneEntityKeyframes(currentScene, id, type, removeKey);
+    setMovie({ ...movie, scenes: updated });
+    setStatusMessage(`Removed ${type} keyframe at Frame ${frame}.`);
   };
 
   const handleUpdateEntityPoseCel = (
@@ -1118,7 +1284,7 @@ export default function App() {
   const handleClearKeyframes = (id: string, type: StageEntityType) => {
     if (!currentScene) return;
     const resolveCur = (kfs: Record<number, KeyframePosition>) =>
-      resolveInterpolatedKeyframe(kfs, currentFrame);
+      resolveInterpolatedKeyframe(kfs, currentFrame, undefined, enableInterpolation);
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = patchSceneEntityKeyframes(
       currentScene,
@@ -1251,7 +1417,14 @@ export default function App() {
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
       setRenderFrame(0);
-      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      playheadRef.current = {
+        sceneIndex: 0,
+        frame: 0,
+        renderFrame: 0,
+        scrollHoldActive: false,
+        scrollElapsedSec: 0,
+        completedScrollIds: {},
+      };
       const firstActor = loaded.scenes[0]?.actors[0];
       setSelectedEntityId(firstActor?.id || null);
       setSelectedEntityType(firstActor ? 'actor' : null);
@@ -1278,7 +1451,14 @@ export default function App() {
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
       setRenderFrame(0);
-      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      playheadRef.current = {
+        sceneIndex: 0,
+        frame: 0,
+        renderFrame: 0,
+        scrollHoldActive: false,
+        scrollElapsedSec: 0,
+        completedScrollIds: {},
+      };
       const firstActor = loaded.scenes[0]?.actors[0];
       setSelectedEntityId(firstActor?.id || null);
       setSelectedEntityType(firstActor ? 'actor' : null);
@@ -1310,7 +1490,14 @@ export default function App() {
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
       setRenderFrame(0);
-      playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+      playheadRef.current = {
+        sceneIndex: 0,
+        frame: 0,
+        renderFrame: 0,
+        scrollHoldActive: false,
+        scrollElapsedSec: 0,
+        completedScrollIds: {},
+      };
       const firstScene = generated.scenes[0];
       const firstEntity = firstScene?.actors[0] || firstScene?.props[0] || firstScene?.tdtTexts?.[0];
       setSelectedEntityId(firstEntity?.id || null);
@@ -1449,6 +1636,22 @@ export default function App() {
             <Save size={13} />
             <span>{isSaving ? 'Saving...' : 'Save .3mm'}</span>
           </button>
+
+          <button
+            onClick={() => {
+              void sound3DMM.playUiWav('DROPDN.WAV');
+              setShowSettingsModal(true);
+            }}
+            title="Rendering & Playback Settings (Shading & Interpolation)"
+            className={`studio-btn px-2.5 py-1 font-bold flex items-center gap-1.5 ${
+              enableInterpolation || enableShading
+                ? 'text-amber-300 border-amber-400'
+                : 'text-purple-100'
+            }`}
+          >
+            <Settings size={13} />
+            <span>Settings</span>
+          </button>
         </div>
       </header>
 
@@ -1463,7 +1666,14 @@ export default function App() {
           setCurrentSceneIndex(idx);
           setCurrentFrame(0);
           setRenderFrame(0);
-          playheadRef.current = { sceneIndex: idx, frame: 0, renderFrame: 0 };
+          playheadRef.current = {
+            sceneIndex: idx,
+            frame: 0,
+            renderFrame: 0,
+            scrollHoldActive: false,
+            scrollElapsedSec: 0,
+            completedScrollIds: {},
+          };
           setSelectedEntityId(null);
           setSelectedEntityType(null);
           setIsRecordingMovement(false);
@@ -1541,6 +1751,8 @@ export default function App() {
                 currentFrame={currentFrame}
                 renderFrame={renderFrame}
                 isPlaying={isPlaying}
+                enableInterpolation={enableInterpolation}
+                enableShading={enableShading}
                 livePlayheadRef={playheadRef}
                 selectedEntityId={selectedEntityId}
                 onSelectEntity={(id, type) => {
@@ -1588,6 +1800,7 @@ export default function App() {
                 currentFrame={currentFrame}
                 totalFrames={currentScene!.totalFrames}
                 onSeekFrame={handleSeekFrame}
+                enableInterpolation={enableInterpolation}
                 catalogActors={catalog.actors}
                 catalogProps={catalog.props}
                 actors={currentScene!.actors}
@@ -1607,10 +1820,12 @@ export default function App() {
                 onUpdateActorCostume={handleUpdateActorCostume}
                 onUpdatePropAction={handleUpdatePropAction}
                 onUpdatePropCostume={handleUpdatePropCostume}
+                onUpdateTdtAction={handleUpdateTdtAction}
                 onUpdateEntityColor={handleUpdateEntityColor}
                 onUpdateEntityRotation={handleUpdateEntityRotation}
                 onUpdateEntityScale={handleUpdateEntityScale}
                 onSetEntityFrame={handleSetEntityFrame}
+                onRemoveEntityKeyframe={handleRemoveEntityKeyframe}
                 onToggleEntityVisibility={handleToggleEntityVisibility}
                 onUpdateEntityPoseCel={handleUpdateEntityPoseCel}
                 onAddTdtText={handleAddTdtText}
@@ -1638,7 +1853,14 @@ export default function App() {
               if (currentFrame === 0 && currentSceneIndex > 0) {
                 setCurrentSceneIndex(0);
                 setRenderFrame(0);
-                playheadRef.current = { sceneIndex: 0, frame: 0, renderFrame: 0 };
+                playheadRef.current = {
+                  sceneIndex: 0,
+                  frame: 0,
+                  renderFrame: 0,
+                  scrollHoldActive: false,
+                  scrollElapsedSec: 0,
+                  completedScrollIds: {},
+                };
                 setSelectedEntityId(null);
                 setSelectedEntityType(null);
               } else {
@@ -1646,6 +1868,9 @@ export default function App() {
                 setRenderFrame(0);
                 playheadRef.current.frame = 0;
                 playheadRef.current.renderFrame = 0;
+                playheadRef.current.scrollHoldActive = false;
+                playheadRef.current.scrollElapsedSec = 0;
+                playheadRef.current.completedScrollIds = {};
               }
             }}
             onOpenAudioModal={() => setIsAudioModalOpen(true)}
@@ -1779,6 +2004,85 @@ export default function App() {
               >
                 <Sparkles size={13} />
                 <span>{isGeneratingAi ? 'Directing Movie...' : 'Generate Movie'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Studio Settings Modal (Shading & Interpolation — Both OFF by default) */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="studio-panel p-4 max-w-md w-full text-xs text-white flex flex-col gap-3">
+            <div className="flex items-center justify-between pb-2 border-b border-purple-700/80">
+              <div className="flex items-center gap-2 font-bold text-sm text-amber-300">
+                <Settings size={16} />
+                <span>Studio Rendering &amp; Playback Settings</span>
+              </div>
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                className="studio-btn px-2 py-0.5 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <label className="studio-well p-2.5 flex items-start justify-between gap-3 cursor-pointer">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-bold text-amber-200 text-xs">Smooth Shading &amp; Shadows</span>
+                <span className="text-[11px] text-purple-200 leading-snug">
+                  When OFF (default), untextured objects use classic flat shading (textured objects stay smooth) with no floor shadows. Turn ON for smooth shading &amp; shadows.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableShading}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setEnableShading(next);
+                  setStatusMessage(`Settings: ${next ? 'Smooth Shading & Shadows ON' : 'Flat Shading (untextured objects) / Shadows OFF'}.`);
+                }}
+                className="mt-1 w-4 h-4 accent-amber-400 shrink-0 cursor-pointer"
+              />
+            </label>
+
+            <label className="studio-well p-2.5 flex items-start justify-between gap-3 cursor-pointer">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-bold text-cyan-200 text-xs">Interpolation (Sub-frame Tweening)</span>
+                <span className="text-[11px] text-purple-200 leading-snug">
+                  When OFF (default), poses, keyframes &amp; 3D word animations step sharply at classic 6 FPS frames. Turn ON for smooth sub-frame tweening.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableInterpolation}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setEnableInterpolation(next);
+                  setStatusMessage(`Settings: Interpolation ${next ? 'ON' : 'OFF (No Interpolation)'}.`);
+                }}
+                className="mt-1 w-4 h-4 accent-cyan-400 shrink-0 cursor-pointer"
+              />
+            </label>
+
+            <div className="flex items-center justify-between pt-2 border-t border-purple-800/70">
+              <button
+                type="button"
+                onClick={() => {
+                  setEnableShading(false);
+                  setEnableInterpolation(false);
+                  setStatusMessage('Reset settings to defaults: No Shading & No Interpolation.');
+                }}
+                className="studio-btn px-2.5 py-1 text-[11px] text-purple-200"
+              >
+                Reset Defaults (Both OFF)
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowSettingsModal(false)}
+                className="bg-emerald-700 hover:bg-emerald-600 border-t-2 border-l-2 border-emerald-400 border-r-2 border-b-2 border-r-emerald-950 border-b-emerald-950 px-3.5 py-1 font-bold text-white"
+              >
+                Done
               </button>
             </div>
           </div>

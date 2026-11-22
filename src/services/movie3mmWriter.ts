@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { ChunkKid } from './chunkyParser';
-import { loadBackgroundView, LoadedBackgroundView, loadTemplate } from './threeDmmEngine';
+import { loadBackgroundView, LoadedBackgroundView, loadTemplate, tdtActionToAnid } from './threeDmmEngine';
 import { loadBasePalette } from './mbmpDecoder';
 import {
   KeyframePosition,
@@ -291,6 +291,7 @@ function buildActorOrPropChunks(
       celOffset?: number;
       freeze?: boolean;
     }[];
+    extraKids?: ChunkKid[];
   }
 ): number {
   const nfrmFirst = 1;
@@ -421,6 +422,9 @@ function buildActorOrPropChunks(
     const colrBytes = new TextEncoder().encode(JSON.stringify(colorMap));
     const colrCno = builder.addChunk('COLR', colrBytes);
     actrKids.push({ ctg: 'COLR', cno: colrCno, chid: 0 });
+  }
+  if (opts.extraKids && opts.extraKids.length > 0) {
+    actrKids.push(...opts.extraKids);
   }
 
   const firstWorld =
@@ -642,11 +646,35 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
           [{ ctg: 'TDT ', cno: tdtCno, chid: 0 }],
           100000 + actrChid
         );
+        const tdtActionEntries: [string, { action: string; freeze?: boolean }][] =
+          tdt.actionKeyframes && Object.keys(tdt.actionKeyframes).length > 0
+            ? Object.entries(tdt.actionKeyframes).sort(([a], [b]) => Number(a) - Number(b))
+            : tdt.action
+              ? [['0', { action: tdt.action, freeze: false }]]
+              : [];
+        const tdtEvents = tdtActionEntries.map(([fk, av]) => ({
+          frame: Math.max(0, Math.round(Number(fk))),
+          anid: tdtActionToAnid(av.action),
+          celOffset: 0,
+          freeze: Boolean(av.freeze),
+        }));
+        const extraKids: ChunkKid[] = [];
+        if (tdt.action || tdt.actionKeyframes) {
+          const tdtaBytes = new TextEncoder().encode(
+            JSON.stringify({
+              action: tdt.action,
+              actionKeyframes: tdt.actionKeyframes,
+            })
+          );
+          const tdtaCno = builder.addChunk('TDTA', tdtaBytes);
+          extraKids.push({ ctg: 'TDTA', cno: tdtaCno, chid: 0 });
+        }
         const actrCno = buildActorOrPropChunks(builder, scene, bgView, {
           tmplCno: tdtTmplCno,
           costumeMtrls: tdt.mtrlCno !== undefined ? [{ ibset: 0, mtrlCno: tdt.mtrlCno }] : undefined,
           keyframes: tdt.keyframes,
-          events: [],
+          events: tdtEvents,
+          extraKids,
         });
         scenChildKids.push({ ctg: 'ACTR', cno: actrCno, chid: actrChid++ });
       }
@@ -720,6 +748,7 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
         tbDv.setInt32(16, Math.round(tb.right), true);
         tbDv.setInt32(20, Math.round(tb.top), true);
         tbDv.setInt32(24, Math.round(tb.bottom), true);
+        tbDv.setInt32(28, tb.isScrolling ? 1 : 0, true);
         tbDv.setInt32(32, tb.isScrolling ? 0 : 1, true);
         const tbCno = builder.addChunk('TBOX', tbBuf, '', [{ ctg: 'RTXT', cno: rtxCno, chid: 0 }]);
         scenChildKids.push({ ctg: 'TBOX', cno: tbCno, chid: ti });

@@ -14,22 +14,36 @@ let basePalettePromise: Promise<Palette256> | null = null;
  */
 export function loadBasePalette(): Promise<Palette256> {
   if (basePalettePromise) return basePalettePromise;
-  basePalettePromise = fetch(assetUrl('3dmm/bmp/SOCPAL.BMP')).then(async (res) => {
-    if (!res.ok) throw new Error(`Failed to load SOCPAL.BMP (${res.status})`);
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const biSize = dv.getUint32(14, true);
-    const palOff = 14 + biSize;
-    const pal = new Uint8Array(256 * 3);
-    for (let i = 0; i < 256; i++) {
-      const o = palOff + i * 4;
-      if (o + 3 <= bytes.length) {
-        pal[i * 3 + 0] = bytes[o + 2]; // R
-        pal[i * 3 + 1] = bytes[o + 1]; // G
-        pal[i * 3 + 2] = bytes[o + 0]; // B
+  basePalettePromise = (async () => {
+    const url = assetUrl('3dmm/bmp/SOCPAL.BMP');
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Failed to load SOCPAL.BMP (${res.status})`);
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const biSize = dv.getUint32(14, true);
+        const palOff = 14 + biSize;
+        const pal = new Uint8Array(256 * 3);
+        for (let i = 0; i < 256; i++) {
+          const o = palOff + i * 4;
+          if (o + 3 <= bytes.length) {
+            pal[i * 3 + 0] = bytes[o + 2]; // R
+            pal[i * 3 + 1] = bytes[o + 1]; // G
+            pal[i * 3 + 2] = bytes[o + 0]; // B
+          }
+        }
+        return pal;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 150 * (attempt + 1)));
       }
     }
-    return pal;
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  })().catch((err) => {
+    basePalettePromise = null;
+    throw err;
   });
   return basePalettePromise;
 }

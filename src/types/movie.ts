@@ -57,12 +57,37 @@ export interface PropEntity {
   keyframes: Record<number, KeyframePosition>;
 }
 
+export type TdtAction =
+  | 'At Rest'
+  | 'Flip Letters'
+  | 'Spin Letters'
+  | 'Cartwheel Letters'
+  | 'Side to Side'
+  | 'Rock'
+  | 'Back and Forth'
+  | 'Grow and Shrink'
+  | 'Flip'
+  | 'Spin'
+  | 'Cartwheel'
+  | 'The Wave'
+  | 'Hide and Appear'
+  | 'Walk Forward*'
+  | 'Hop'
+  | 'Stretch';
+
+export interface TdtActionKeyframe {
+  action: TdtAction | string;
+  freeze?: boolean;
+}
+
 export interface TdtTextEntity {
   id: string;
   text: string;
   tdfCno: number;
-  tdts: number;
+  tdts: number; // 0=flat, 1=circle, 2=arch, 6=vertical, 7=curved
   mtrlCno?: number;
+  action?: TdtAction | string;
+  actionKeyframes?: Record<number, TdtActionKeyframe>;
   keyframes: Record<number, KeyframePosition>;
 }
 

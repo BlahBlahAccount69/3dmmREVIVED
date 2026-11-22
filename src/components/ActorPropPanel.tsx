@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
   ActorEntity,
+  KeyframePosition,
   PropAction,
   PropEntity,
   ScreenTextBox,
+  TdtAction,
   TdtTextEntity,
 } from '../types/movie';
 import {
@@ -13,6 +15,7 @@ import {
   loadTemplate,
   ParsedTemplate,
   TDF_FONT_OPTIONS,
+  TDT_ACTIONS,
   TDT_SHAPE_OPTIONS,
   TdtMaterialSwatch,
 } from '../services/threeDmmEngine';
@@ -20,6 +23,7 @@ import {
   resolveActorActionAtFrame,
   resolveInterpolatedKeyframe,
   resolvePropActionAtFrame,
+  resolveTdtActionAtFrame,
 } from './Viewport3D';
 import { sound3DMM } from '../services/soundLibrary';
 import { assetUrl } from '../utils/assetUrl';
@@ -29,6 +33,7 @@ interface ActorPropPanelProps {
   currentFrame: number;
   totalFrames: number;
   onSeekFrame: (frame: number) => void;
+  enableInterpolation?: boolean;
   catalogActors: CatalogActorItem[];
   catalogProps: CatalogPropItem[];
   actors: ActorEntity[];
@@ -44,6 +49,7 @@ interface ActorPropPanelProps {
   onUpdateActorCostume: (id: string, costumeCmids: number[]) => void;
   onUpdatePropAction: (id: string, action: PropAction, anid?: number) => void;
   onUpdatePropCostume: (id: string, costumeCmids: number[]) => void;
+  onUpdateTdtAction: (id: string, action: TdtAction | string) => void;
   onUpdateEntityColor: (id: string, type: 'actor' | 'prop' | 'tdt', color?: string) => void;
   onUpdateEntityRotation: (
     id: string,
@@ -63,7 +69,12 @@ interface ActorPropPanelProps {
     id: string,
     type: 'actor' | 'prop' | 'tdt',
     targetFrame: number,
-    mode: 'pin' | 'showFrom'
+    mode: 'pin' | 'showFrom' | 'hideFrom'
+  ) => void;
+  onRemoveEntityKeyframe?: (
+    id: string,
+    type: 'actor' | 'prop' | 'tdt',
+    frame: number
   ) => void;
   onToggleEntityVisibility: (
     id: string,
@@ -82,6 +93,7 @@ interface ActorPropPanelProps {
     tdts: number;
     mtrlCno?: number;
     color?: string;
+    action?: TdtAction | string;
   }) => void;
   onUpdateTdtText: (
     id: string,
@@ -130,6 +142,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
   currentFrame,
   totalFrames,
   onSeekFrame,
+  enableInterpolation = false,
   catalogActors,
   catalogProps,
   actors,
@@ -144,10 +157,12 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
   onUpdateActorCostume,
   onUpdatePropAction,
   onUpdatePropCostume,
+  onUpdateTdtAction,
   onUpdateEntityColor,
   onUpdateEntityRotation,
   onUpdateEntityScale,
   onSetEntityFrame,
+  onRemoveEntityKeyframe,
   onToggleEntityVisibility,
   onUpdateEntityPoseCel,
   onAddTdtText,
@@ -171,6 +186,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
   const [new3dFont, setNew3dFont] = useState(2); // Comic
   const [new3dShape, setNew3dShape] = useState(0); // Straight
   const [new3dMtrlCno, setNew3dMtrlCno] = useState<number>(25348);
+  const [new3dAction, setNew3dAction] = useState<string>('At Rest');
 
   // 2D Onscreen Words creator state
   const [new2dText, setNew2dText] = useState('Type words here...');
@@ -228,9 +244,17 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
   const activePropAction = selectedProp
     ? resolvePropActionAtFrame(selectedProp, currentFrame)
     : null;
+  const activeTdtAction = selectedTdt
+    ? resolveTdtActionAtFrame(selectedTdt, currentFrame)
+    : null;
   const selected3DEntity = selectedActor || selectedProp || selectedTdt;
   const activeTransform = selected3DEntity
-    ? resolveInterpolatedKeyframe(selected3DEntity.keyframes, currentFrame)
+    ? resolveInterpolatedKeyframe(
+        selected3DEntity.keyframes,
+        currentFrame,
+        undefined,
+        enableInterpolation
+      )
     : null;
   const curRotX = activeTransform?.rotX ?? 0;
   const curRotY = activeTransform?.rotY ?? 0;
@@ -504,6 +528,30 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
       </div>
 
       {/* Specific Frame Placement, Active Frame & Pose Cel Controls */}
+      {renderFrameTimingControls(
+        id,
+        kind,
+        selected3DEntity?.keyframes || {},
+        celsCount,
+        curCel,
+        isFreeze
+      )}
+    </>
+  );
+
+  const renderFrameTimingControls = (
+    id: string,
+    kind: 'actor' | 'prop' | 'tdt',
+    keyframesMap: Record<number, KeyframePosition>,
+    celsCount = 0,
+    curCel = 0,
+    isFreeze = false
+  ) => {
+    const sortedKfFrames = Object.keys(keyframesMap)
+      .map(Number)
+      .sort((a, b) => a - b);
+
+    return (
       <div className="studio-well p-1.5 flex flex-col gap-1.5 text-[10px]">
         <div className="flex flex-wrap items-center justify-between gap-1">
           <span className="font-bold text-cyan-200">Frame Timing:</span>
@@ -554,7 +602,64 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           >
             Enter @ f
           </button>
+          <button
+            type="button"
+            onClick={() => onSetEntityFrame(id, kind, parseTargetFrame(), 'hideFrom')}
+            className="studio-btn px-1.5 py-0.5 font-bold text-rose-200"
+            title="Hide / exit stage starting at this specific frame"
+          >
+            Exit @ f
+          </button>
         </div>
+
+        {sortedKfFrames.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1">
+            <span className="text-purple-200 shrink-0">Keys:</span>
+            {sortedKfFrames.map((fn) => {
+              const kf = keyframesMap[fn];
+              const isHiddenKey = kf?.visible === false;
+              const isCurrent = fn === currentFrame;
+              return (
+                <div
+                  key={fn}
+                  className={`inline-flex items-center border ${
+                    isCurrent
+                      ? 'bg-amber-400 text-black font-bold border-white'
+                      : isHiddenKey
+                        ? 'bg-rose-950/80 text-rose-200 border-rose-700'
+                        : 'studio-well text-cyan-200 border-purple-700'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onSeekFrame(fn)}
+                    className="px-1.5 py-0.5 font-mono"
+                    title={
+                      isHiddenKey
+                        ? `Hidden at Frame ${fn} (click to jump)`
+                        : `Visible keyframe at Frame ${fn} (click to jump)`
+                    }
+                  >
+                    f{fn}
+                    {isHiddenKey ? '🚫' : ''}
+                  </button>
+                  {sortedKfFrames.length > 1 && onRemoveEntityKeyframe && (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveEntityKeyframe(id, kind, fn)}
+                      className={`px-1 py-0.5 font-bold hover:text-rose-400 ${
+                        isCurrent ? 'text-black/75' : 'text-purple-300'
+                      }`}
+                      title={`Remove keyframe @ f${fn}`}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {kind !== 'tdt' && (
           <div className="flex flex-wrap items-center justify-between gap-1">
@@ -609,8 +714,8 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           </div>
         )}
       </div>
-    </>
-  );
+    );
+  };
 
   const handleSubmit2dBox = () => {
     const clean = new2dText.trim();
@@ -860,6 +965,21 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                   </div>
                 )}
 
+                <label className="flex flex-col gap-0.5 text-[10px]">
+                  <span className="text-purple-200">3D Word Animation:</span>
+                  <select
+                    value={new3dAction}
+                    onChange={(e) => setNew3dAction(e.target.value)}
+                    className="studio-well px-1.5 py-1 text-white focus:outline-none"
+                  >
+                    {TDT_ACTIONS.map((act) => (
+                      <option key={act} value={act}>
+                        {act}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
                 <button
                   type="button"
                   onClick={() => {
@@ -870,6 +990,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                       tdfCno: new3dFont,
                       tdts: new3dShape,
                       mtrlCno: new3dMtrlCno,
+                      action: new3dAction,
                     });
                   }}
                   className="bg-amber-600 hover:bg-amber-500 border-t-2 border-l-2 border-amber-300 border-r-2 border-b-2 border-r-amber-950 border-b-amber-950 py-1 font-bold text-white"
@@ -1360,7 +1481,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
             </button>
           </div>
         </div>
-      ) : selectedTdt ? (
+      ) : selectedTdt && activeTdtAction ? (
         <div className="studio-panel p-2.5 flex flex-col gap-2">
           <div className="flex items-center justify-between pb-1 border-b border-emerald-700/70">
             <span className="font-bold text-emerald-300 truncate">
@@ -1377,6 +1498,60 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
             onChange={(e) => onUpdateTdtText(selectedTdt.id, { text: e.target.value })}
             className="studio-well px-2 py-1 text-xs font-bold text-white focus:outline-none"
           />
+
+          {/* 3D Word Animation Switcher */}
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-bold text-emerald-200">
+              3D Word Animation @ Frame {currentFrame}:
+            </label>
+            <select
+              value={activeTdtAction.action}
+              onChange={(e) => {
+                const act = e.target.value;
+                const low = act.toLowerCase();
+                if (low.includes('grow') || low.includes('stretch')) void sound3DMM.playUiWav('GROW.WAV');
+                else if (low.includes('hide')) void sound3DMM.playUiWav('SHRINK.WAV');
+                else if (low.includes('spin') || low.includes('flip') || low.includes('cartwheel')) void sound3DMM.playUiWav('SPIN.WAV');
+                else if (low.includes('walk') || low.includes('hop')) void sound3DMM.playUiWav('ACTSTEPF.WAV');
+                else void sound3DMM.playUiWav('SACT.WAV');
+                onUpdateTdtAction(selectedTdt.id, act);
+              }}
+              className="studio-well px-2 py-1 text-xs text-white focus:outline-none cursor-pointer w-full min-w-0"
+            >
+              {TDT_ACTIONS.map((act) => (
+                <option key={act} value={act}>
+                  {act}
+                </option>
+              ))}
+            </select>
+
+            {selectedTdt.actionKeyframes &&
+              Object.keys(selectedTdt.actionKeyframes).length > 1 && (
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {Object.entries(selectedTdt.actionKeyframes)
+                    .sort(([a], [b]) => Number(a) - Number(b))
+                    .map(([fStr, val]) => {
+                      const fn = Number(fStr);
+                      return (
+                        <button
+                          key={fStr}
+                          onClick={() => onSeekFrame(fn)}
+                          className={`px-1.5 py-0.5 text-[10px] border ${
+                            fn === activeTdtAction.startFrame
+                              ? 'bg-amber-400 text-black font-bold border-white'
+                              : 'studio-well text-emerald-200 border-emerald-700'
+                          }`}
+                        >
+                          f{fn}: {val.action}
+                        </button>
+                      );
+                    })}
+                </div>
+              )}
+          </div>
+
+          {/* Frame Timing directly accessible when selecting a 3D Word */}
+          {renderFrameTimingControls(selectedTdt.id, 'tdt', selectedTdt.keyframes)}
 
           <div className="grid grid-cols-2 gap-1.5 text-[10px]">
             <label className="flex flex-col gap-0.5">
@@ -1434,7 +1609,95 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
 
           {renderRotationControls(selectedTdt.id, 'tdt')}
           {renderColorControls(selectedTdt.id, 'tdt')}
-          {renderStretchAndFrameControls(selectedTdt.id, 'tdt', 0, 0, false)}
+          {/* Stretch & Squash only for 3D Word since Frame Timing is shown prominently above */}
+          <div className="studio-well p-1.5 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="font-bold text-amber-200">
+                Stretch &amp; Squash @ f{currentFrame}:
+              </span>
+              <span className="font-mono text-cyan-200">
+                {curScaleX.toFixed(2)}×{curScaleY.toFixed(2)}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1 text-[10px]">
+              <button
+                type="button"
+                onClick={() => {
+                  void sound3DMM.playUiWav('GROW.WAV');
+                  onUpdateEntityScale(
+                    selectedTdt.id,
+                    'tdt',
+                    Number((curScaleX * 0.78).toFixed(2)),
+                    Number((curScaleY * 1.28).toFixed(2)),
+                    Number((curScaleZ * 0.78).toFixed(2))
+                  );
+                }}
+                className="studio-btn py-0.5 font-bold"
+                title="Stretch taller & thinner"
+              >
+                ↕ Stretch
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void sound3DMM.playUiWav('SQUASH.WAV');
+                  onUpdateEntityScale(
+                    selectedTdt.id,
+                    'tdt',
+                    Number((curScaleX * 1.28).toFixed(2)),
+                    Number((curScaleY * 0.75).toFixed(2)),
+                    Number((curScaleZ * 1.28).toFixed(2))
+                  );
+                }}
+                className="studio-btn py-0.5 font-bold"
+                title="Squash flatter & wider"
+              >
+                ↔ Squash
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void sound3DMM.playUiWav('GROW.WAV');
+                  onUpdateEntityScale(
+                    selectedTdt.id,
+                    'tdt',
+                    Number((curScaleX * 1.18).toFixed(2)),
+                    Number((curScaleY * 1.18).toFixed(2)),
+                    Number((curScaleZ * 1.18).toFixed(2))
+                  );
+                }}
+                className="studio-btn py-0.5 font-bold"
+                title="Grow bigger"
+              >
+                + Big
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void sound3DMM.playUiWav('SHRINK.WAV');
+                  onUpdateEntityScale(
+                    selectedTdt.id,
+                    'tdt',
+                    Number((curScaleX * 0.84).toFixed(2)),
+                    Number((curScaleY * 0.84).toFixed(2)),
+                    Number((curScaleZ * 0.84).toFixed(2))
+                  );
+                }}
+                className="studio-btn py-0.5 font-bold"
+                title="Shrink smaller"
+              >
+                - Small
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdateEntityScale(selectedTdt.id, 'tdt', 1, 1, 1)}
+                className="studio-btn py-0.5 font-bold text-amber-200"
+                title="Reset scale to 1.0x"
+              >
+                1×
+              </button>
+            </div>
+          </div>
 
           <button
             onClick={onToggleRecordingMovement}
@@ -1734,22 +1997,27 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               </button>
             );
           })}
-          {tdtTexts.map((tdt) => (
-            <button
-              key={tdt.id}
-              onClick={() => onSelectEntity(tdt.id, 'tdt')}
-              className={`flex items-center justify-between px-2 py-1 text-left text-xs ${
-                selectedEntityId === tdt.id
-                  ? 'bg-emerald-700 border border-amber-200 text-white font-bold'
-                  : 'studio-well text-emerald-100 hover:brightness-110'
-              }`}
-            >
-              <span className="truncate">🔤 3D: {tdt.text}</span>
-              <span className="text-[10px] font-mono opacity-80 ml-1">
-                {Object.keys(tdt.keyframes).length}f
-              </span>
-            </button>
-          ))}
+          {tdtTexts.map((tdt) => {
+            const actNow = resolveTdtActionAtFrame(tdt, currentFrame);
+            return (
+              <button
+                key={tdt.id}
+                onClick={() => onSelectEntity(tdt.id, 'tdt')}
+                className={`flex items-center justify-between px-2 py-1 text-left text-xs ${
+                  selectedEntityId === tdt.id
+                    ? 'bg-emerald-700 border border-amber-200 text-white font-bold'
+                    : 'studio-well text-emerald-100 hover:brightness-110'
+                }`}
+              >
+                <span className="truncate">
+                  🔤 3D: {tdt.text} ({actNow.action})
+                </span>
+                <span className="text-[10px] font-mono opacity-80 ml-1">
+                  {Object.keys(tdt.keyframes).length}f
+                </span>
+              </button>
+            );
+          })}
           {textBoxes.map((tb) => (
             <button
               key={tb.id}

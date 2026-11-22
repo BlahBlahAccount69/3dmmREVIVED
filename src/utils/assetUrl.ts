@@ -1,6 +1,6 @@
 /**
- * Resolves static asset paths under public/ so deployments work both at root (/)
- * and on GitHub Pages / subpath origins (./) without failing fetches or broken images.
+ * Resolves static asset paths under public/ so deployments work reliably at root (/),
+ * in local dev, and on GitHub Pages subpath origins (./ via document.baseURI).
  */
 export function assetUrl(path: string): string {
   const clean = path.replace(/^\/+/, '');
@@ -12,6 +12,16 @@ export function assetUrl(path: string): string {
     }
   } catch {
     base = './';
+  }
+  if (base === './' || base === '.') {
+    if (typeof document !== 'undefined' && document.baseURI) {
+      try {
+        return new URL(clean, document.baseURI).href;
+      } catch {
+        // fallback below
+      }
+    }
+    return `./${clean}`;
   }
   if (!base.endsWith('/')) base += '/';
   return `${base}${clean}`;

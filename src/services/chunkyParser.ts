@@ -17,10 +17,43 @@ export interface ChunkMeta {
   name: string;
 }
 
+async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+  attempts = 3
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, init);
+      if (res.ok || res.status === 206 || (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429)) {
+        return res;
+      }
+      lastErr = new Error(`HTTP ${res.status} fetching ${url}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, 150 * Math.pow(2, i)));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+function isChn2Header(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 28 &&
+    bytes[0] === 0x43 &&
+    bytes[1] === 0x48 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x32
+  );
+}
+
 /**
  * Browser reader for Microsoft 3D Movie Maker CHN2 chunky archives (.3TH, .3CN, .3MM).
- * Uses HTTP Range requests for large .3CN archives (TMPLS.3CN, BKGDS.3CN, SNDS.3CN) when
- * supported by the static server, falling back cleanly to full-buffer fetch otherwise.
+ * Uses cache-busted HTTP Range requests for lazy single-chunk reads and cleanly upgrades to a
+ * single deduplicated full-buffer download when preloading or if a static CDN drops/throttles Range requests.
  */
 export class ChunkyFile {
   public readonly url: string | null;
@@ -29,6 +62,7 @@ export class ChunkyFile {
   private byCtg = new Map<string, ChunkMeta[]>();
   private fullBuffer: Uint8Array | null = null;
   private chunkCache = new Map<string, Uint8Array>();
+  private rawChunkPromises = new Map<string, Promise<Uint8Array>>();
   private pendingFullLoad: Promise<Uint8Array> | null = null;
   private rangeSupported: boolean | null = null;
 
@@ -59,17 +93,25 @@ export class ChunkyFile {
     }
 
     try {
-      const headRes = await fetch(url, { headers: { Range: 'bytes=0-63' } });
+      const headRes = await fetchWithRetry(
+        url,
+        { headers: { Range: 'bytes=0-63' }, cache: 'no-store' },
+        2
+      );
       if (headRes.status === 206) {
         const headBuf = new Uint8Array(await headRes.arrayBuffer());
-        const dv = new DataView(headBuf.buffer, headBuf.byteOffset, headBuf.byteLength);
-        const sig = String.fromCharCode(headBuf[0], headBuf[1], headBuf[2], headBuf[3]);
-        if (sig === 'CHN2') {
+        if (isChn2Header(headBuf)) {
+          const dv = new DataView(headBuf.buffer, headBuf.byteOffset, headBuf.byteLength);
           const fpIndex = dv.getInt32(20, true);
           const cbIndex = dv.getInt32(24, true);
-          const idxRes = await fetch(url, {
-            headers: { Range: `bytes=${fpIndex}-${fpIndex + cbIndex - 1}` },
-          });
+          const idxRes = await fetchWithRetry(
+            url,
+            {
+              headers: { Range: `bytes=${fpIndex}-${fpIndex + cbIndex - 1}` },
+              cache: 'no-store',
+            },
+            2
+          );
           if (idxRes.status === 206) {
             const idxBuf = new Uint8Array(await idxRes.arrayBuffer());
             if (idxBuf.length === cbIndex) {
@@ -79,9 +121,21 @@ export class ChunkyFile {
             }
           }
         }
+      } else if (headRes.status === 200) {
+        // Static host returned the full archive instead of 206; parse directly without re-fetching!
+        const fullBuf = new Uint8Array(await headRes.arrayBuffer());
+        if (isChn2Header(fullBuf)) {
+          cf.fullBuffer = fullBuf;
+          cf.rangeSupported = false;
+          const dv = new DataView(fullBuf.buffer, fullBuf.byteOffset, fullBuf.byteLength);
+          const fpIndex = dv.getInt32(20, true);
+          const cbIndex = dv.getInt32(24, true);
+          cf.parseIndex(fullBuf.subarray(fpIndex, fpIndex + cbIndex));
+          return cf;
+        }
       }
     } catch {
-      // Fallback below
+      // Fallback cleanly to full-buffer load below
     }
 
     cf.rangeSupported = false;
@@ -89,28 +143,44 @@ export class ChunkyFile {
     return cf;
   }
 
+  public ensureFullBuffer(): Promise<Uint8Array> {
+    return this.loadFullBuffer();
+  }
+
   private async loadFullBuffer(): Promise<Uint8Array> {
     if (this.fullBuffer) return this.fullBuffer;
     if (!this.url) throw new Error('ChunkyFile has no URL or buffer');
     if (this.pendingFullLoad) return this.pendingFullLoad;
 
-    this.pendingFullLoad = fetch(this.url).then(async (res) => {
-      if (!res.ok) throw new Error(`Failed to fetch ${this.url}: ${res.status}`);
-      const buf = new Uint8Array(await res.arrayBuffer());
-      this.fullBuffer = buf;
-      if (this.chunks.length === 0) {
-        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-        const fpIndex = dv.getInt32(20, true);
-        const cbIndex = dv.getInt32(24, true);
-        this.parseIndex(buf.subarray(fpIndex, fpIndex + cbIndex));
-      }
-      return buf;
-    });
+    const url = this.url;
+    const p = fetchWithRetry(url, undefined, 3)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+        const buf = new Uint8Array(await res.arrayBuffer());
+        if (!isChn2Header(buf)) {
+          throw new Error(`Invalid CHN2 archive payload from ${url} (len=${buf.length})`);
+        }
+        this.fullBuffer = buf;
+        this.rangeSupported = false;
+        if (this.chunks.length === 0) {
+          const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+          const fpIndex = dv.getInt32(20, true);
+          const cbIndex = dv.getInt32(24, true);
+          this.parseIndex(buf.subarray(fpIndex, fpIndex + cbIndex));
+        }
+        return buf;
+      })
+      .catch((err) => {
+        this.pendingFullLoad = null;
+        throw err;
+      });
 
-    return this.pendingFullLoad;
+    this.pendingFullLoad = p;
+    return p;
   }
 
   private parseIndex(idxBytes: Uint8Array) {
+    if (this.chunks.length > 0) return;
     const dv = new DataView(idxBytes.buffer, idxBytes.byteOffset, idxBytes.byteLength);
     const ilocMac = dv.getInt32(4, true);
     const bvMac = dv.getInt32(8, true);
@@ -192,25 +262,58 @@ export class ChunkyFile {
   }
 
   public async readRawChunk(ctg: string, cno: number): Promise<Uint8Array> {
+    const key = `${ctg}:${cno >>> 0}`;
     const meta = this.getChunkMeta(ctg, cno);
-    if (!meta) throw new Error(`Missing chunk ${ctg}:${cno} in ${this.url || 'buffer'}`);
+    if (!meta) throw new Error(`Missing chunk ${key} in ${this.url || 'buffer'}`);
 
     if (this.fullBuffer) {
       return this.fullBuffer.subarray(meta.fp, meta.fp + meta.cb);
     }
 
-    if (this.rangeSupported && this.url) {
-      const res = await fetch(this.url, {
-        headers: { Range: `bytes=${meta.fp}-${meta.fp + meta.cb - 1}` },
-      });
-      if (res.status === 206) {
-        const bytes = new Uint8Array(await res.arrayBuffer());
-        if (bytes.length === meta.cb) return bytes;
-      }
+    if (this.pendingFullLoad) {
+      const buf = await this.pendingFullLoad;
+      return buf.subarray(meta.fp, meta.fp + meta.cb);
     }
 
-    const buf = await this.loadFullBuffer();
-    return buf.subarray(meta.fp, meta.fp + meta.cb);
+    const existing = this.rawChunkPromises.get(key);
+    if (existing) return existing;
+
+    const job = (async (): Promise<Uint8Array> => {
+      if (this.rangeSupported && this.url) {
+        try {
+          const res = await fetchWithRetry(
+            this.url,
+            {
+              headers: { Range: `bytes=${meta.fp}-${meta.fp + meta.cb - 1}` },
+              cache: 'no-store',
+            },
+            2
+          );
+          if (res.status === 206) {
+            const bytes = new Uint8Array(await res.arrayBuffer());
+            if (bytes.length === meta.cb) return bytes;
+          } else if (res.status === 200) {
+            const fullBuf = new Uint8Array(await res.arrayBuffer());
+            if (isChn2Header(fullBuf) && meta.fp + meta.cb <= fullBuf.length) {
+              this.fullBuffer = fullBuf;
+              this.rangeSupported = false;
+              return fullBuf.subarray(meta.fp, meta.fp + meta.cb);
+            }
+          }
+        } catch {
+          // Range request rejected or throttled by CDN; upgrade cleanly to full buffer
+        }
+        this.rangeSupported = false;
+      }
+
+      const buf = await this.loadFullBuffer();
+      return buf.subarray(meta.fp, meta.fp + meta.cb);
+    })().finally(() => {
+      this.rawChunkPromises.delete(key);
+    });
+
+    this.rawChunkPromises.set(key, job);
+    return job;
   }
 
   public async readChunk(ctg: string, cno: number): Promise<Uint8Array> {
@@ -231,10 +334,19 @@ export class ChunkyFile {
 const openArchivePromises = new Map<string, Promise<ChunkyFile>>();
 
 export function getArchive(path: string, preloadWhole = false): Promise<ChunkyFile> {
-  const key = `${path}:${preloadWhole ? 'full' : 'lazy'}`;
+  const fullKey = `${path}:full`;
+  const lazyKey = `${path}:lazy`;
+  if (!preloadWhole) {
+    const existingFull = openArchivePromises.get(fullKey);
+    if (existingFull) return existingFull;
+  }
+  const key = preloadWhole ? fullKey : lazyKey;
   let p = openArchivePromises.get(key);
   if (!p) {
-    p = ChunkyFile.fromUrl(path, preloadWhole);
+    p = ChunkyFile.fromUrl(path, preloadWhole).catch((err) => {
+      openArchivePromises.delete(key);
+      throw err;
+    });
     openArchivePromises.set(key, p);
   }
   return p;

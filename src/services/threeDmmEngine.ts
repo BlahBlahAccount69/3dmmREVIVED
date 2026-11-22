@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { TdtAction } from '../types/movie';
 import { ChunkyFile, ChunkMeta, getArchive } from './chunkyParser';
 import {
   parseGL,
@@ -268,7 +269,10 @@ export function loadThreeDmmCatalog(): Promise<ThreeDmmCatalog> {
     }
 
     return { actors, props, scenes };
-  })();
+  })().catch((err) => {
+    catalogPromise = null;
+    throw err;
+  });
 
   return catalogPromise;
 }
@@ -484,20 +488,19 @@ export async function loadDirectMtrl(
   const cached = directMtrlCache.get(key);
   if (cached) return cached;
   const p = (async () => {
-    try {
-      const palette = await loadBasePalette();
-      if (overrideArchive) {
-        const customMeta = overrideArchive.getChunkMeta('MTRL', mtrlCno);
-        if (customMeta) return (await parseMtrlToThree(overrideArchive, customMeta, palette)).material;
-      }
-      const mtrlsCn = await getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false);
-      const meta = mtrlsCn.getChunkMeta('MTRL', mtrlCno);
-      if (!meta) return null;
-      return (await parseMtrlToThree(mtrlsCn, meta, palette)).material;
-    } catch {
-      return null;
+    const palette = await loadBasePalette();
+    if (overrideArchive) {
+      const customMeta = overrideArchive.getChunkMeta('MTRL', mtrlCno);
+      if (customMeta) return (await parseMtrlToThree(overrideArchive, customMeta, palette)).material;
     }
-  })();
+    const mtrlsCn = await getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false);
+    const meta = mtrlsCn.getChunkMeta('MTRL', mtrlCno);
+    if (!meta) return null;
+    return (await parseMtrlToThree(mtrlsCn, meta, palette)).material;
+  })().catch(() => {
+    directMtrlCache.delete(key);
+    return null;
+  });
   directMtrlCache.set(key, p);
   return p;
 }
@@ -506,26 +509,25 @@ export function loadTdfFont(tdfCno: number): Promise<ParsedTdfFont | null> {
   const cached = tdfFontCache.get(tdfCno);
   if (cached) return cached;
   const p = (async () => {
-    try {
-      const tdfs = await getArchive(assetUrl('3dmm/3dmovie/TDFS.3CN'), false);
-      const tdfMeta = tdfs.getChunkMeta('TDF ', tdfCno) || tdfs.getChunksByType('TDF ')[0];
-      if (!tdfMeta) return null;
-      const raw = await tdfs.readChunk('TDF ', tdfMeta.cno);
-      const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-      const widths: number[] = [];
-      for (let i = 0; i < 256 && 12 + i * 4 + 4 <= raw.length; i++) {
-        widths.push(readFixed16(dv, 12 + i * 4));
-      }
-      return {
-        tdfCno: tdfMeta.cno,
-        name: tdfMeta.name || `Font ${tdfMeta.cno}`,
-        widths,
-        glyphGeos: new Map<number, THREE.BufferGeometry>(),
-      };
-    } catch {
-      return null;
+    const tdfs = await getArchive(assetUrl('3dmm/3dmovie/TDFS.3CN'), false);
+    const tdfMeta = tdfs.getChunkMeta('TDF ', tdfCno) || tdfs.getChunksByType('TDF ')[0];
+    if (!tdfMeta) return null;
+    const raw = await tdfs.readChunk('TDF ', tdfMeta.cno);
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    const widths: number[] = [];
+    for (let i = 0; i < 256 && 12 + i * 4 + 4 <= raw.length; i++) {
+      widths.push(readFixed16(dv, 12 + i * 4));
     }
-  })();
+    return {
+      tdfCno: tdfMeta.cno,
+      name: tdfMeta.name || `Font ${tdfMeta.cno}`,
+      widths,
+      glyphGeos: new Map<number, THREE.BufferGeometry>(),
+    };
+  })().catch(() => {
+    tdfFontCache.delete(tdfCno);
+    return null;
+  });
   tdfFontCache.set(tdfCno, p);
   return p;
 }
@@ -558,24 +560,23 @@ let tdtMaterialSwatchesPromise: Promise<TdtMaterialSwatch[]> | null = null;
 export function loadTdtMaterialSwatches(): Promise<TdtMaterialSwatch[]> {
   if (tdtMaterialSwatchesPromise) return tdtMaterialSwatchesPromise;
   tdtMaterialSwatchesPromise = (async () => {
-    try {
-      const [palette, mtrlsCn] = await Promise.all([
-        loadBasePalette(),
-        getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false),
-      ]);
-      const swatches: TdtMaterialSwatch[] = [];
-      for (const meta of mtrlsCn.getChunksByType('MTRL')) {
-        if (meta.cno < 25344 || meta.cno > 25360) continue;
-        const parsed = await parseMtrlToThree(mtrlsCn, meta, palette);
-        const std = parsed.material as THREE.MeshStandardMaterial;
-        const hex = std.color ? '#' + std.color.getHexString() : '#f59e0b';
-        swatches.push({ mtrlCno: meta.cno, hex });
-      }
-      return swatches;
-    } catch {
-      return [];
+    const [palette, mtrlsCn] = await Promise.all([
+      loadBasePalette(),
+      getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false),
+    ]);
+    const swatches: TdtMaterialSwatch[] = [];
+    for (const meta of mtrlsCn.getChunksByType('MTRL')) {
+      if (meta.cno < 25344 || meta.cno > 25360) continue;
+      const parsed = await parseMtrlToThree(mtrlsCn, meta, palette);
+      const std = parsed.material as THREE.MeshStandardMaterial;
+      const hex = std.color ? '#' + std.color.getHexString() : '#f59e0b';
+      swatches.push({ mtrlCno: meta.cno, hex });
     }
-  })();
+    return swatches;
+  })().catch(() => {
+    tdtMaterialSwatchesPromise = null;
+    return [];
+  });
   return tdtMaterialSwatchesPromise;
 }
 
@@ -664,6 +665,12 @@ export async function buildTdtTextGroup(
         mesh.position.set(0, curY, 0);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
+        mesh.userData.restPos = mesh.position.clone();
+        mesh.userData.restRotY = mesh.rotation.y;
+        mesh.userData.restRotZ = mesh.rotation.z;
+        mesh.userData.restScaleY = mesh.scale.y;
+        mesh.userData.charIdx = i;
+        mesh.userData.xrFract = charCodes.length > 1 ? i / (charCodes.length - 1) : 0.5;
         group.add(mesh);
       }
       curY -= 5.4;
@@ -686,6 +693,7 @@ export async function buildTdtTextGroup(
     mesh.receiveShadow = true;
 
     const normPos = totalWidth > 0.1 ? cx / (totalWidth * 0.5) : 0; // -1..1
+    const xrFract = totalWidth > 0.1 ? (cx + totalWidth * 0.5) / totalWidth : 0.5;
     if (tdts === 1) {
       // Circle / Ring wrap
       const radius = Math.max(8, totalWidth / (2 * Math.PI) + 4);
@@ -712,6 +720,12 @@ export async function buildTdtTextGroup(
       mesh.position.set(cx, 0, 0);
     }
 
+    mesh.userData.restPos = mesh.position.clone();
+    mesh.userData.restRotY = mesh.rotation.y;
+    mesh.userData.restRotZ = mesh.rotation.z;
+    mesh.userData.restScaleY = mesh.scale.y;
+    mesh.userData.charIdx = i;
+    mesh.userData.xrFract = Math.max(0, Math.min(1, xrFract));
     group.add(mesh);
   }
 
@@ -984,7 +998,12 @@ export function loadTemplate(
   })();
 
   if (!overrideArchive) {
-    templateCache.set(key, p);
+    const tracked = p.catch((err) => {
+      templateCache.delete(key);
+      throw err;
+    });
+    templateCache.set(key, tracked);
+    return tracked;
   }
   return p;
 }
@@ -1105,9 +1124,14 @@ export function applyCostumeToRig(
           if (meshes[iprt].geometry?.userData?.isIsolatedInwardShell) {
             cloned.side = THREE.DoubleSide;
           }
+          delete meshes[iprt].userData.litMaterial;
+          delete meshes[iprt].userData.unlitMaterial;
           meshes[iprt].material = cloned;
           const std = cloned as THREE.MeshStandardMaterial;
           rig.baseMaterialColors[iprt] = std.color ? std.color.clone() : new THREE.Color(0xffffff);
+          if (rig.root.userData.enableShading === false) {
+            applyObjectShadingMode(meshes[iprt], false);
+          }
         }
         ibmtl++;
       }
@@ -1125,9 +1149,14 @@ export function applyCostumeToRig(
             if (meshes[iprt].geometry?.userData?.isIsolatedInwardShell) {
               cloned.side = THREE.DoubleSide;
             }
+            delete meshes[iprt].userData.litMaterial;
+            delete meshes[iprt].userData.unlitMaterial;
             meshes[iprt].material = cloned;
             const std = cloned as THREE.MeshStandardMaterial;
             rig.baseMaterialColors[iprt] = std.color ? std.color.clone() : new THREE.Color(0xffffff);
+            if (rig.root.userData.enableShading === false) {
+              applyObjectShadingMode(meshes[iprt], false);
+            }
           }
         }
       });
@@ -1346,6 +1375,298 @@ export function applyPropActionTransform(
   meshRoot.rotation.set(baseRotX, baseRotY + rotOffset, baseRotZ, 'YXZ');
 }
 
+export const TDT_ACTIONS: TdtAction[] = [
+  'At Rest',
+  'Flip Letters',
+  'Spin Letters',
+  'Cartwheel Letters',
+  'Side to Side',
+  'Rock',
+  'Back and Forth',
+  'Grow and Shrink',
+  'Flip',
+  'Spin',
+  'Cartwheel',
+  'The Wave',
+  'Hide and Appear',
+  'Walk Forward*',
+  'Hop',
+  'Stretch',
+];
+
+export const TDT_ACTION_TO_ANID: Record<TdtAction, number> = {
+  'At Rest': 0,
+  'Flip Letters': 1,
+  'Spin Letters': 2,
+  'Cartwheel Letters': 3,
+  'Side to Side': 4,
+  'Rock': 5,
+  'Back and Forth': 6,
+  'Grow and Shrink': 7,
+  'Flip': 8,
+  'Spin': 9,
+  'Cartwheel': 10,
+  'The Wave': 11,
+  'Hide and Appear': 12,
+  'Walk Forward*': 13,
+  'Hop': 14,
+  'Stretch': 15,
+};
+
+export function anidToTdtAction(anid: number): TdtAction {
+  return TDT_ACTIONS[anid] ?? 'At Rest';
+}
+
+export function tdtActionToAnid(action?: string): number {
+  const norm = normalizeTdtActionName(action);
+  return TDT_ACTION_TO_ANID[norm] ?? 0;
+}
+
+export function normalizeTdtActionName(raw?: string): TdtAction {
+  const clean = (raw || '').trim().toLowerCase();
+  if (!clean || clean === 'at rest' || clean === 'rest') return 'At Rest';
+  const exact = TDT_ACTIONS.find((a) => a.toLowerCase() === clean);
+  if (exact) return exact;
+  if (clean === 'walk forward' || clean === 'walk') return 'Walk Forward*';
+  if (clean === 'wave') return 'The Wave';
+  if (clean === 'pulse' || clean === 'grow' || clean === 'shrink') return 'Grow and Shrink';
+  if (clean === 'bounce' || clean === 'jump') return 'Hop';
+  if (clean === 'wobble') return 'Rock';
+  if (clean === 'spin fast') return 'Spin Letters';
+  if (clean === 'grow fast') return 'Grow and Shrink';
+  if (clean === 'shrink fast') return 'Hide and Appear';
+  if (clean === 'float') return 'The Wave';
+  return 'At Rest';
+}
+
+const _tdtShearMat = new THREE.Matrix4();
+const _tdtShapeMat = new THREE.Matrix4();
+const _tdtPosTmp = new THREE.Vector3();
+const _tdtQuatTmp = new THREE.Quaternion();
+const _tdtEulerTmp = new THREE.Euler(0, 0, 0, 'YXZ');
+const _tdtScaleTmp = new THREE.Vector3();
+
+/**
+ * Applies authentic Microsoft 3D Movie Maker TDT animations (TDT.CPP cels & transforms 0..15)
+ * non-destructively on top of base keyframe transforms, resetting every glyph cleanly per frame.
+ */
+export function applyTdtActionTransform(
+  group: THREE.Group,
+  action: string,
+  frame: number,
+  _totalFrames: number,
+  scaleX: number,
+  scaleY: number,
+  scaleZ: number,
+  baseRotX: number,
+  baseRotY: number,
+  baseRotZ: number,
+  worldPos?: THREE.Vector3
+) {
+  const act = normalizeTdtActionName(action);
+  const anid = TDT_ACTION_TO_ANID[act] ?? 0;
+  // Exact cel counts from TDT::_CcelOfTda in Microsoft 3DMM TDT.CPP
+  const ccel =
+    anid === 0
+      ? 1
+      : anid >= 8 && anid <= 13
+        ? 24
+        : 12;
+
+  const icel = ((frame % ccel) + ccel) % ccel;
+  const rFractCel = ccel > 1 ? icel / ccel : 0;
+  const rSwing = Math.sin(Math.PI * 2 * rFractCel);
+
+  let wordRotXOff = 0;
+  let wordRotYOff = 0;
+  let wordRotZOff = 0;
+
+  if (act === 'Flip') {
+    wordRotXOff = rFractCel * Math.PI * 2;
+  } else if (act === 'Spin') {
+    wordRotYOff = -rFractCel * Math.PI * 2;
+  } else if (act === 'Cartwheel') {
+    wordRotZOff = rFractCel * Math.PI * 2;
+  }
+
+  for (let i = 0; i < group.children.length; i++) {
+    const mesh = group.children[i] as THREE.Mesh;
+    const restPos = mesh.userData?.restPos as THREE.Vector3 | undefined;
+    if (!restPos) continue;
+
+    const restRotY = (mesh.userData.restRotY as number) ?? 0;
+    const restRotZ = (mesh.userData.restRotZ as number) ?? 0;
+    const restScaleY = (mesh.userData.restScaleY as number) ?? 1;
+    const ich = (mesh.userData.charIdx as number) ?? i;
+    const xrFract = (mesh.userData.xrFract as number) ?? 0.5;
+
+    let lRotX = 0;
+    let lRotY = 0;
+    let lRotZ = 0;
+    let lSx = 1;
+    let lSy = 1;
+    let lSz = 1;
+    let lDx = 0;
+    let lDy = 0;
+    let lDz = 0;
+    let shearYx = 0;
+    let shearZx = 0;
+    let shearYz = 0;
+
+    switch (act) {
+      case 'At Rest':
+        break;
+      case 'Flip Letters':
+        lRotX = rFractCel * Math.PI * 2;
+        break;
+      case 'Spin Letters':
+        lRotY = rFractCel * Math.PI * 2;
+        break;
+      case 'Cartwheel Letters':
+        lRotZ = rFractCel * Math.PI * 2;
+        break;
+      case 'Side to Side':
+        shearYx = 0.25 * rSwing;
+        break;
+      case 'Rock':
+        shearZx = 0.5 * rSwing;
+        break;
+      case 'Back and Forth':
+        shearYz = 0.5 * rSwing;
+        break;
+      case 'Grow and Shrink': {
+        const sc = 1 + 0.25 * rSwing;
+        lSx = sc;
+        lSy = sc;
+        lSz = sc;
+        break;
+      }
+      case 'The Wave': {
+        let rTheta = (xrFract - rFractCel) * (3 * Math.PI);
+        if (rTheta < -2 * Math.PI) rTheta += 3 * Math.PI;
+        rTheta = Math.max(0, Math.min(Math.PI, rTheta));
+        lSy = 1 + Math.sin(rTheta);
+        break;
+      }
+      case 'Hide and Appear': {
+        let rTheta: number;
+        if (icel < ccel / 2) {
+          const dxr = (icel / (ccel / 2)) * (4 / 3);
+          rTheta = (xrFract - dxr) * (3 * Math.PI) + 1.5 * Math.PI;
+          rTheta = Math.max(0.5 * Math.PI, Math.min(1.5 * Math.PI, rTheta));
+        } else {
+          const dxr = ((icel - ccel / 2) / (ccel / 2)) * (4 / 3);
+          rTheta = (xrFract - dxr) * (3 * Math.PI) + Math.PI;
+          rTheta = Math.max(-0.5 * Math.PI, Math.min(0.5 * Math.PI, rTheta));
+        }
+        lSy = 0.1 + 0.5 + 0.5 * Math.sin(rTheta);
+        break;
+      }
+      case 'Walk Forward*': {
+        const fOdd = ich % 2 !== 0;
+        const stepWalk = 0.22;
+        let rTheta = rFractCel * Math.PI * 2;
+        if (fOdd) {
+          lDz = (icel < ccel / 2 ? ccel / 2 - icel : icel - ccel / 2) * stepWalk;
+          rTheta -= Math.PI;
+        } else {
+          lDz = (icel < ccel / 2 ? icel : ccel - icel) * stepWalk;
+        }
+        rTheta = Math.max(0, Math.min(Math.PI, rTheta));
+        lDy = Math.sin(rTheta) * 1.4;
+        break;
+      }
+      case 'Hop': {
+        const phaseSplit = (ccel * 2) / 3;
+        if (icel < phaseSplit) {
+          const rTheta = (icel / phaseSplit) * Math.PI;
+          lDy = Math.sin(rTheta) * 1.65;
+        } else {
+          const rTheta = ((icel - phaseSplit) / (ccel / 3)) * Math.PI + Math.PI;
+          lSy = 1 + Math.sin(rTheta) * 0.5;
+        }
+        break;
+      }
+      case 'Stretch': {
+        const rTheta = rFractCel * Math.PI * 2 + 1.5 * Math.PI;
+        lSx = 1.5 + 0.5 * Math.sin(rTheta);
+        break;
+      }
+      default:
+        break;
+    }
+
+    const hasShear = Math.abs(shearYx) > 1e-4 || Math.abs(shearZx) > 1e-4 || Math.abs(shearYz) > 1e-4;
+    if (hasShear) {
+      mesh.matrixAutoUpdate = false;
+      _tdtEulerTmp.set(0, restRotY, restRotZ, 'YXZ');
+      _tdtQuatTmp.setFromEuler(_tdtEulerTmp);
+      _tdtScaleTmp.set(1, restScaleY, 1);
+      _tdtShapeMat.compose(restPos, _tdtQuatTmp, _tdtScaleTmp);
+      // Local shear matrix matching BrMatrix34PreShearY / PreShearZ
+      _tdtShearMat.set(
+        1, shearYx, shearYz, 0,
+        0, 1, 0, 0,
+        shearZx, 0, 1, 0,
+        0, 0, 0, 1
+      );
+      mesh.matrix.copy(_tdtShapeMat).multiply(_tdtShearMat);
+      mesh.matrixWorldNeedsUpdate = true;
+    } else {
+      mesh.matrixAutoUpdate = true;
+      _tdtPosTmp.set(restPos.x + lDx, restPos.y + lDy, restPos.z + lDz);
+      mesh.position.copy(_tdtPosTmp);
+      mesh.rotation.set(lRotX, restRotY + lRotY, restRotZ + lRotZ, 'YXZ');
+      mesh.scale.set(lSx, restScaleY * lSy, lSz);
+    }
+  }
+
+  if (worldPos) {
+    group.position.copy(worldPos);
+  }
+  group.scale.set(scaleX, scaleY, scaleZ);
+  group.rotation.set(baseRotX + wordRotXOff, baseRotY + wordRotYOff, baseRotZ + wordRotZOff, 'YXZ');
+}
+
+/**
+ * Toggles between Classic Flat Shading (default when shading OFF, ONLY for untextured objects)
+ * and Smooth Shading + Shadows (when shading ON) while keeping all materials lit in 3D space.
+ */
+export function applyObjectShadingMode(root: THREE.Object3D, enableShading: boolean) {
+  root.userData.enableShading = enableShading;
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+
+    const curMat = mesh.material as THREE.MeshStandardMaterial | undefined;
+    if (!curMat) return;
+
+    let litMat = mesh.userData.litMaterial as THREE.MeshStandardMaterial | undefined;
+    if (!litMat && curMat.isMeshStandardMaterial) {
+      litMat = curMat;
+      mesh.userData.litMaterial = litMat;
+    }
+    if (!litMat) return;
+
+    if (curMat.color && litMat.color && curMat !== litMat) {
+      litMat.color.copy(curMat.color);
+    }
+    if (mesh.material !== litMat) {
+      mesh.material = litMat;
+    }
+
+    const isTextured = Boolean(litMat.map);
+    const wantFlat = !enableShading && !isTextured;
+    if (litMat.flatShading !== wantFlat) {
+      litMat.flatShading = wantFlat;
+      litMat.needsUpdate = true;
+    }
+
+    mesh.castShadow = enableShading;
+    mesh.receiveShadow = enableShading;
+  });
+}
+
 const _tmpScale = new THREE.Vector3();
 
 /**
@@ -1562,42 +1883,44 @@ export function loadBackgroundView(bkgdCno: number, icam: number): Promise<Loade
     };
   })();
 
-  bgViewCache.set(key, p);
-  return p;
+  const tracked = p.catch((err) => {
+    bgViewCache.delete(key);
+    throw err;
+  });
+  bgViewCache.set(key, tracked);
+  return tracked;
 }
 
 let preloadPromise: Promise<void> | null = null;
 
 /**
- * Preloads shared 3DMM archives, all scene camera views (MBMP/ZBMP/CAM), and actor/prop templates
- * in background batches so switching scenes, camera angles, or spawning cast is instantaneous.
+ * Preloads shared 3DMM archives, all scene camera views (MBMP/ZBMP/CAM), and actor/prop templates.
+ * Upgrades .3CN archives to single full-buffer downloads before preloading all views/templates so static
+ * CDNs like GitHub Pages never hit Range rate limits or HTTP/2 partial-response drops.
  */
 export function preloadThreeDmmAssets(catalog: ThreeDmmCatalog): Promise<void> {
   if (preloadPromise) return preloadPromise;
 
   preloadPromise = (async () => {
-    // 1. Ensure shared archives are fetched & indexed
-    const archiveJobs = Promise.allSettled([
-      getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false),
-      getArchive(assetUrl('3dmm/3dmovie/TDFS.3CN'), false),
-      getArchive(assetUrl('3dmm/3dmovie/SNDS.3CN'), false),
+    // 1. Warm the opening scene's first view right away
+    const firstScene = catalog.scenes[0];
+    if (firstScene?.views[0]) {
+      await loadBackgroundView(firstScene.bkgdCno, firstScene.views[0].icam).catch(() => {});
+    }
+
+    // 2. Download each shared .3CN archive once cleanly instead of spamming thousands of Range requests
+    await Promise.allSettled([
+      getArchive(assetUrl('3dmm/3dmovie/BKGDS.3CN'), false).then((a) => a.ensureFullBuffer()),
+      getArchive(assetUrl('3dmm/3dmovie/TMPLS.3CN'), false).then((a) => a.ensureFullBuffer()),
+      getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false).then((a) => a.ensureFullBuffer()),
+      getArchive(assetUrl('3dmm/3dmovie/TDFS.3CN'), false).then((a) => a.ensureFullBuffer()),
+      getArchive(assetUrl('3dmm/3dmovie/SNDS.3CN'), false).then((a) => a.ensureFullBuffer()),
       getArchive(assetUrl('3dmm/3dmovie/SOUND.3TH'), true),
     ]);
 
-    // 2. Immediately warm all camera views of the opening scene
-    const firstScene = catalog.scenes[0];
-    if (firstScene) {
-      await Promise.allSettled(
-        firstScene.views.map((v) => loadBackgroundView(firstScene.bkgdCno, v.icam))
-      );
-    }
-
-    await archiveJobs;
-
-    // 3. Queue remaining scenes' views, then actor/prop templates in small concurrent batches
+    // 3. Hydrate all camera views and actor/prop templates directly from RAM buffers
     const tasks: (() => Promise<unknown>)[] = [];
-    for (let si = 1; si < catalog.scenes.length; si++) {
-      const sc = catalog.scenes[si];
+    for (const sc of catalog.scenes) {
       for (const v of sc.views) {
         tasks.push(() => loadBackgroundView(sc.bkgdCno, v.icam));
       }
@@ -1623,7 +1946,10 @@ export function preloadThreeDmmAssets(catalog: ThreeDmmCatalog): Promise<void> {
     };
 
     await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
-  })();
+  })().catch((err) => {
+    preloadPromise = null;
+    throw err;
+  });
 
   return preloadPromise;
 }
