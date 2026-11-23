@@ -1,6 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { KeyframePosition, PropAction, Scene, TdtTextEntity } from '../types/movie';
+import {
+  KeyframePosition,
+  PropAction,
+  Scene,
+  SceneTransition,
+  ScreenTextBox,
+  TdtTextEntity,
+} from '../types/movie';
 import {
   applyActionCelBlendedToRig,
   applyActionCelToRig,
@@ -23,7 +30,13 @@ import {
 import { sound3DMM } from '../services/soundLibrary';
 import { assetUrl } from '../utils/assetUrl';
 
-export type StageEntityType = 'actor' | 'prop' | 'tdt';
+export type StageEntityType = 'actor' | 'prop' | 'tdt' | 'tbox';
+
+export interface TransitionOverlayState {
+  mode: SceneTransition;
+  opacity: number;
+  snapshotDataUrl?: string | null;
+}
 
 export interface LivePlayheadState {
   sceneIndex: number;
@@ -47,6 +60,9 @@ interface Viewport3DProps {
   livePlayheadRef?: React.MutableRefObject<LivePlayheadState>;
   selectedEntityId: string | null;
   onSelectEntity: (id: string | null, type: StageEntityType | null) => void;
+  onUpdateTextBox?: (id: string, patch: Partial<ScreenTextBox>) => void;
+  transitionOverlay?: TransitionOverlayState | null;
+  stageCaptureRef?: React.MutableRefObject<(() => string | null) | null>;
   onStageViewReady?: (view: LoadedBackgroundView) => void;
   moveUpDownMode: boolean;
   onToggleMoveUpDown: () => void;
@@ -77,12 +93,54 @@ interface Viewport3DProps {
   ) => void;
 }
 
+function resolveCssFontFamily(fontName?: string): string {
+  const raw = (fontName || 'Comic Sans MS').replace(/"/g, '').trim() || 'Comic Sans MS';
+  const low = raw.toLowerCase();
+  if (low.includes('comic')) {
+    return `"${raw}", "Comic Sans MS", "Comic Neue", "Chalkboard SE", cursive, sans-serif`;
+  }
+  if (low.includes('futura')) {
+    return `"${raw}", Futura, "Century Gothic", "Trebuchet MS", sans-serif`;
+  }
+  if (low.includes('times')) {
+    return `"${raw}", "Times New Roman", Times, Georgia, serif`;
+  }
+  if (
+    low.includes('georgia') ||
+    low.includes('garamond') ||
+    low.includes('bookman') ||
+    low.includes('palatino')
+  ) {
+    return `"${raw}", Georgia, "Times New Roman", serif`;
+  }
+  if (low.includes('courier') || low.includes('mono') || low.includes('consolas')) {
+    return `"${raw}", "Courier New", Courier, monospace`;
+  }
+  if (low.includes('impact') || low.includes('placard')) {
+    return `"${raw}", Impact, "Arial Narrow", sans-serif`;
+  }
+  if (low.includes('brush') || low.includes('script') || low.includes('mistral')) {
+    return `"${raw}", "Brush Script MT", "Segoe Script", cursive`;
+  }
+  return `"${raw}", Arial, Helvetica, sans-serif`;
+}
+
+function hexLuminance(hex: string): number {
+  const clean = hex.replace('#', '');
+  if (clean.length < 6) return 0.5;
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 // Reusable scratchpads (zero per-frame allocations)
 const _camRightXZ = new THREE.Vector3();
 const _camForwardXZ = new THREE.Vector3();
 const _worldPosTmp = new THREE.Vector3();
 const _screenPtA = new THREE.Vector3();
 const _screenPtB = new THREE.Vector3();
+const _boxCornerTmp = new THREE.Vector3();
 const _eulerRotA = new THREE.Euler(0, 0, 0, 'YXZ');
 const _eulerRotB = new THREE.Euler(0, 0, 0, 'YXZ');
 const _eulerRotOut = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -553,6 +611,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   livePlayheadRef,
   selectedEntityId,
   onSelectEntity,
+  onUpdateTextBox,
+  transitionOverlay,
+  stageCaptureRef,
   onStageViewReady,
   moveUpDownMode,
   onToggleMoveUpDown,
@@ -565,6 +626,38 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 }) => {
   const wellRef = useRef<HTMLDivElement>(null);
   const mountRef = useRef<HTMLDivElement>(null);
+  const backdropImgRef = useRef<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    if (!stageCaptureRef) return;
+    stageCaptureRef.current = () => {
+      const renderer = rendererRef.current;
+      const scene = sceneRef.current;
+      const camera = cameraRef.current;
+      if (!renderer || !scene || !camera) return null;
+      try {
+        renderer.render(scene, camera);
+        const outCanvas = document.createElement('canvas');
+        outCanvas.width = 544;
+        outCanvas.height = 306;
+        const ctx = outCanvas.getContext('2d');
+        if (!ctx) return null;
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, 544, 306);
+        const bgImg = backdropImgRef.current;
+        if (bgImg && bgImg.complete && bgImg.naturalWidth > 0) {
+          ctx.drawImage(bgImg, 0, 0, 544, 306);
+        }
+        ctx.drawImage(renderer.domElement, 0, 0, 544, 306);
+        return outCanvas.toDataURL('image/png');
+      } catch {
+        return null;
+      }
+    };
+    return () => {
+      stageCaptureRef.current = null;
+    };
+  }, [stageCaptureRef]);
   const [stageBoxSize, setStageBoxSize] = useState<{ w: number; h: number }>({ w: 544, h: 306 });
   const [backdropUrl, setBackdropUrl] = useState<string | null>(null);
   const [loadingStage, setLoadingStage] = useState<boolean>(true);
@@ -724,6 +817,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       renderer = new THREE.WebGLRenderer({
         alpha: true,
         antialias: !isSoftwareGl,
+        preserveDrawingBuffer: true,
         powerPreference: 'high-performance',
       });
     } catch (err) {
@@ -1698,17 +1792,33 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     mousePosRef.current.set(ndcX, ndcY);
     raycasterRef.current.setFromCamera(mousePosRef.current, camera);
 
+    const isHierarchyVisible = (obj: THREE.Object3D): boolean => {
+      let cur: THREE.Object3D | null = obj;
+      while (cur) {
+        if (!cur.visible) return false;
+        cur = cur.parent;
+      }
+      return true;
+    };
+
     const pickables: THREE.Object3D[] = [];
-    actorRigsRef.current.forEach((rig) => pickables.push(rig.root));
-    propRigsRef.current.forEach((rig) => pickables.push(rig.root));
-    tdtGroupsRef.current.forEach((grp) => pickables.push(grp));
+    actorRigsRef.current.forEach((rig) => {
+      if (rig.root.visible) pickables.push(rig.root);
+    });
+    propRigsRef.current.forEach((rig) => {
+      if (rig.root.visible) pickables.push(rig.root);
+    });
+    tdtGroupsRef.current.forEach((grp) => {
+      if (grp.visible) pickables.push(grp);
+    });
 
     const intersects = raycasterRef.current.intersectObjects(pickables, true);
     let clickedId: string | null = null;
     let clickedType: StageEntityType | null = null;
 
-    if (intersects.length > 0) {
-      let top: THREE.Object3D | null = intersects[0].object;
+    const firstVisibleHit = intersects.find((hit) => isHierarchyVisible(hit.object));
+    if (firstVisibleHit) {
+      let top: THREE.Object3D | null = firstVisibleHit.object;
       while (top && !top.userData?.id && top.parent) {
         top = top.parent;
       }
@@ -1726,6 +1836,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       let bestPx = 56;
 
       const checkTouch = (id: string, type: StageEntityType, root: THREE.Object3D, approxH: number) => {
+        if (!root.visible) return;
         _screenPtA.set(root.position.x, root.position.y + 0.5, root.position.z).project(camera);
         _screenPtB.set(root.position.x, root.position.y + approxH, root.position.z).project(camera);
         if (_screenPtA.z > 1 || _screenPtB.z > 1) return;
@@ -1741,9 +1852,48 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         }
       };
 
+      const checkTdtBox = (id: string, grp: THREE.Group) => {
+        if (!grp.visible) return;
+        grp.updateMatrixWorld(true);
+        _dragBox.setFromObject(grp);
+        if (_dragBox.isEmpty()) return;
+        const { min, max } = _dragBox;
+        let minSx = Infinity;
+        let maxSx = -Infinity;
+        let minSy = Infinity;
+        let maxSy = -Infinity;
+        let inFront = false;
+        for (let ix = 0; ix < 2; ix++) {
+          for (let iy = 0; iy < 2; iy++) {
+            for (let iz = 0; iz < 2; iz++) {
+              _boxCornerTmp
+                .set(ix ? max.x : min.x, iy ? max.y : min.y, iz ? max.z : min.z)
+                .project(camera);
+              if (_boxCornerTmp.z <= 1) inFront = true;
+              const sx = (_boxCornerTmp.x + 1) * 0.5 * rect.width;
+              const sy = (-_boxCornerTmp.y + 1) * 0.5 * rect.height;
+              if (sx < minSx) minSx = sx;
+              if (sx > maxSx) maxSx = sx;
+              if (sy < minSy) minSy = sy;
+              if (sy > maxSy) maxSy = sy;
+            }
+          }
+        }
+        if (!inFront) return;
+        const pad = 16;
+        const cx = Math.max(minSx - pad, Math.min(maxSx + pad, localX));
+        const cy = Math.max(minSy - pad, Math.min(maxSy + pad, localY));
+        const d = Math.hypot(localX - cx, localY - cy);
+        if (d < bestPx) {
+          bestPx = d;
+          closestId = id;
+          closestType = 'tdt';
+        }
+      };
+
       actorRigsRef.current.forEach((rig, id) => checkTouch(id, 'actor', rig.root, 8.0));
       propRigsRef.current.forEach((rig, id) => checkTouch(id, 'prop', rig.root, 5.0));
-      tdtGroupsRef.current.forEach((grp, id) => checkTouch(id, 'tdt', grp, 4.0));
+      tdtGroupsRef.current.forEach((grp, id) => checkTdtBox(id, grp));
 
       if (closestId && closestType) {
         clickedId = closestId;
@@ -1801,6 +1951,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     lastHeadingPosRef.current = { x: worldStart.x, z: worldStart.z };
     recordingFrameRef.current = currentFrameRef.current;
 
+    targetObj.updateMatrixWorld(true);
     _dragBox.setFromObject(targetObj);
     _dragBox.getSize(_dragSize);
     _dragSize.x = Math.max(2.5, _dragSize.x) + 0.6;
@@ -2111,6 +2262,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         {/* Real Pre-rendered 544x306 MBMP Stage Backdrop */}
         {backdropUrl && (
           <img
+            ref={backdropImgRef}
             src={backdropUrl}
             alt={sceneData.sceneName}
             draggable={false}
@@ -2143,7 +2295,13 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           const widthPct = Math.max(1, Math.min(100 - leftPct, ((tb.right - tb.left) / 544) * 100));
           const heightPct = Math.max(1, Math.min(100 - topPct, ((tb.bottom - tb.top) / 306) * 100));
           const fontSizeCqw = (((tb.fontSize ?? 14) * 1.18) / 544) * 100;
-          const textColor = tb.color || '#f9f9f9';
+          const textColor = tb.color || '#0b0b0b';
+          const lum = hexLuminance(textColor);
+          const adaptiveShadow = tb.bgColor
+            ? undefined
+            : lum >= 0.32
+              ? '1px 1px 2px rgba(0,0,0,0.92), -1px -1px 1px rgba(0,0,0,0.6)'
+              : '0 0 2px rgba(255,255,255,0.55)';
           const displayText = tb.isScrolling
             ? tb.text.replace(/^(?:[ \t]*\r?\n)+/, '')
             : tb.text;
@@ -2159,6 +2317,45 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 Boolean(live?.completedScrollIds?.[tb.id])
               )
             : undefined;
+          const isSel = !isPlaying && selectedEntityId === tb.id;
+          const isLargeTransparentScroll = tb.isScrolling && !tb.bgColor && !isSel;
+
+          const handleTextBoxPointerDown = (e: React.PointerEvent) => {
+            if (isPlaying) return;
+            e.stopPropagation();
+            e.preventDefault();
+            onSelectEntity(tb.id, 'tbox');
+            if (!onUpdateTextBox || stageBoxSize.w <= 0 || stageBoxSize.h <= 0) return;
+
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const origLeft = tb.left;
+            const origTop = tb.top;
+            const boxW = Math.max(24, tb.right - tb.left);
+            const boxH = Math.max(18, tb.bottom - tb.top);
+
+            const onMove = (ev: PointerEvent) => {
+              const dx = ((ev.clientX - startX) / stageBoxSize.w) * 544;
+              const dy = ((ev.clientY - startY) / stageBoxSize.h) * 306;
+              if (Math.abs(dx) < 0.8 && Math.abs(dy) < 0.8) return;
+              const nextLeft = Math.round(Math.max(0, Math.min(544 - boxW, origLeft + dx)));
+              const nextTop = Math.round(Math.max(0, Math.min(306 - boxH, origTop + dy)));
+              onUpdateTextBox(tb.id, {
+                left: nextLeft,
+                top: nextTop,
+                right: nextLeft + boxW,
+                bottom: nextTop + boxH,
+              });
+            };
+            const onUp = () => {
+              window.removeEventListener('pointermove', onMove);
+              window.removeEventListener('pointerup', onUp);
+              window.removeEventListener('pointercancel', onUp);
+            };
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onUp);
+            window.addEventListener('pointercancel', onUp);
+          };
 
           return (
             <div
@@ -2167,24 +2364,28 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                 if (el) textBoxOuterRefs.current.set(tb.id, el);
                 else textBoxOuterRefs.current.delete(tb.id);
               }}
-              className="absolute z-10 pointer-events-none overflow-hidden select-none"
+              onPointerDown={isLargeTransparentScroll ? undefined : handleTextBoxPointerDown}
+              className={`absolute z-10 overflow-hidden select-none ${
+                isPlaying || isLargeTransparentScroll
+                  ? 'pointer-events-none'
+                  : 'pointer-events-auto cursor-move'
+              }`}
               style={{
                 left: `${leftPct}%`,
                 top: `${topPct}%`,
                 width: `${widthPct}%`,
                 height: `${heightPct}%`,
-                backgroundColor: tb.bgColor || 'transparent',
+                backgroundColor: tb.bgColor || (isSel ? 'rgba(251, 191, 36, 0.08)' : 'transparent'),
+                outline: isSel ? '2px dashed #fbbf24' : undefined,
                 padding: tb.bgColor ? '0.6cqw 1cqw' : undefined,
-                fontFamily: `"${tb.fontName || 'Comic Sans MS'}", "Comic Sans MS", cursive, sans-serif`,
+                fontFamily: resolveCssFontFamily(tb.fontName),
                 fontSize: `${fontSizeCqw.toFixed(2)}cqw`,
                 fontWeight: tb.bold ? 700 : 400,
                 fontStyle: tb.italic ? 'italic' : 'normal',
                 lineHeight: 1.24,
                 tabSize: 4,
                 color: textColor,
-                textShadow: tb.bgColor
-                  ? undefined
-                  : '1px 1px 2px rgba(0,0,0,0.92), -1px -1px 1px rgba(0,0,0,0.6)',
+                textShadow: adaptiveShadow,
               }}
             >
               <div
@@ -2192,18 +2393,75 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
                   if (el) textBoxInnerRefs.current.set(tb.id, el);
                   else textBoxInnerRefs.current.delete(tb.id);
                 }}
-                className="whitespace-pre-wrap break-words"
+                onPointerDown={isLargeTransparentScroll ? handleTextBoxPointerDown : undefined}
+                className={`whitespace-pre-wrap break-words ${
+                  !isPlaying && isLargeTransparentScroll ? 'pointer-events-auto cursor-move' : ''
+                }`}
                 style={
                   scrollRes
                     ? { transform: scrollRes.transform, opacity: scrollRes.hidden ? 0 : 1 }
                     : undefined
                 }
               >
-                {displayText}
+                {tb.runs && tb.runs.length > 0
+                  ? tb.runs.map((run, rIdx) => {
+                      const runText =
+                        rIdx === 0 && tb.isScrolling
+                          ? run.text.replace(/^(?:[ \t]*\r?\n)+/, '')
+                          : run.text;
+                      const rColor = run.color || textColor;
+                      const rSizeCqw = (((run.fontSize ?? tb.fontSize ?? 14) * 1.18) / 544) * 100;
+                      const rLum = hexLuminance(rColor);
+                      return (
+                        <span
+                          key={rIdx}
+                          style={{
+                            fontFamily: resolveCssFontFamily(run.fontName || tb.fontName),
+                            fontSize: `${rSizeCqw.toFixed(2)}cqw`,
+                            fontWeight: (run.bold ?? tb.bold) ? 700 : 400,
+                            fontStyle: (run.italic ?? tb.italic) ? 'italic' : 'normal',
+                            color: rColor,
+                            textShadow: tb.bgColor
+                              ? undefined
+                              : rLum >= 0.32
+                                ? '1px 1px 2px rgba(0,0,0,0.92), -1px -1px 1px rgba(0,0,0,0.6)'
+                                : '0 0 2px rgba(255,255,255,0.55)',
+                          }}
+                        >
+                          {runText}
+                        </span>
+                      );
+                    })
+                  : displayText}
               </div>
             </div>
           );
         })}
+
+        {/* Authentic Scene Transition Overlay (Cut / Fade to Black / Fade to White / Dissolve) */}
+        {transitionOverlay && transitionOverlay.opacity > 0.004 && (
+          <div
+            className="absolute inset-0 z-30 pointer-events-none"
+            style={{ opacity: Math.max(0, Math.min(1, transitionOverlay.opacity)) }}
+          >
+            {transitionOverlay.mode === 'dissolve' && transitionOverlay.snapshotDataUrl ? (
+              <img
+                src={transitionOverlay.snapshotDataUrl}
+                alt=""
+                draggable={false}
+                className="w-full h-full object-fill"
+              />
+            ) : (
+              <div
+                className="w-full h-full"
+                style={{
+                  backgroundColor:
+                    transitionOverlay.mode === 'fadeToWhite' ? '#ffffff' : '#000000',
+                }}
+              />
+            )}
+          </div>
+        )}
 
         {loadingStage && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/55 text-amber-300 font-bold text-sm pointer-events-none">

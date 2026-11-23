@@ -120,11 +120,14 @@ const PROP_ACTIONS: PropAction[] = [
 const FONT_2D_OPTIONS = [
   'Comic Sans MS',
   'Arial',
+  'Futura',
   'Times New Roman',
   'Courier New',
   'Impact',
   'Verdana',
   'Georgia',
+  'Trebuchet MS',
+  'Tahoma',
 ];
 
 function wrapDeg(rad: number): number {
@@ -1751,7 +1754,9 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           <textarea
             rows={2}
             value={selectedTextBox.text}
-            onChange={(e) => onUpdateTextBox(selectedTextBox.id, { text: e.target.value })}
+            onChange={(e) =>
+              onUpdateTextBox(selectedTextBox.id, { text: e.target.value, runs: undefined })
+            }
             className="studio-well px-2 py-1 text-white focus:outline-none resize-y"
           />
 
@@ -1760,10 +1765,20 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               <span className="text-purple-200">Font:</span>
               <select
                 value={selectedTextBox.fontName}
-                onChange={(e) => onUpdateTextBox(selectedTextBox.id, { fontName: e.target.value })}
+                onChange={(e) =>
+                  onUpdateTextBox(selectedTextBox.id, {
+                    fontName: e.target.value,
+                    runs: undefined,
+                  })
+                }
                 className="studio-well px-1.5 py-1 text-white focus:outline-none"
               >
-                {FONT_2D_OPTIONS.map((fn) => (
+                {Array.from(
+                  new Set([
+                    ...FONT_2D_OPTIONS,
+                    ...(selectedTextBox.fontName ? [selectedTextBox.fontName] : []),
+                  ])
+                ).map((fn) => (
                   <option key={fn} value={fn}>
                     {fn}
                   </option>
@@ -1778,7 +1793,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                 max={64}
                 value={selectedTextBox.fontSize ?? 14}
                 onChange={(e) =>
-                  onUpdateTextBox(selectedTextBox.id, { fontSize: Number(e.target.value) })
+                  onUpdateTextBox(selectedTextBox.id, {
+                    fontSize: Number(e.target.value),
+                    runs: undefined,
+                  })
                 }
                 className="accent-amber-400 h-1.5 mt-1"
               />
@@ -1790,8 +1808,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               <span className="text-purple-200">Color:</span>
               <input
                 type="color"
-                value={selectedTextBox.color || '#ffffff'}
-                onChange={(e) => onUpdateTextBox(selectedTextBox.id, { color: e.target.value })}
+                value={selectedTextBox.color || '#0b0b0b'}
+                onChange={(e) =>
+                  onUpdateTextBox(selectedTextBox.id, { color: e.target.value, runs: undefined })
+                }
                 className="w-5 h-4 cursor-pointer bg-transparent"
               />
             </label>
@@ -1820,7 +1840,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
             <button
               type="button"
               onClick={() =>
-                onUpdateTextBox(selectedTextBox.id, { bold: !selectedTextBox.bold })
+                onUpdateTextBox(selectedTextBox.id, {
+                  bold: !selectedTextBox.bold,
+                  runs: undefined,
+                })
               }
               className={`px-1.5 py-0.5 font-bold border ${
                 selectedTextBox.bold
@@ -1833,7 +1856,10 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
             <button
               type="button"
               onClick={() =>
-                onUpdateTextBox(selectedTextBox.id, { italic: !selectedTextBox.italic })
+                onUpdateTextBox(selectedTextBox.id, {
+                  italic: !selectedTextBox.italic,
+                  runs: undefined,
+                })
               }
               className={`px-1.5 py-0.5 italic border ${
                 selectedTextBox.italic
@@ -1917,17 +1943,35 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
             </label>
           </div>
 
-          <div className="flex items-center justify-between pt-1 border-t border-emerald-800/70">
-            <label className="flex items-center gap-1 text-[10px] text-cyan-200">
-              <input
-                type="checkbox"
-                checked={selectedTextBox.isScrolling}
-                onChange={(e) =>
-                  onUpdateTextBox(selectedTextBox.id, { isScrolling: e.target.checked })
+          <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 border-t border-emerald-800/70">
+            <div className="flex items-center gap-1 text-[10px]">
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdateTextBox(selectedTextBox.id, { isScrolling: false })
                 }
-              />
-              <span>Scrolling Credits</span>
-            </label>
+                className={`px-2 py-0.5 font-bold border ${
+                  !selectedTextBox.isScrolling
+                    ? 'bg-cyan-400 text-slate-950 border-white'
+                    : 'studio-btn text-purple-100'
+                }`}
+              >
+                Stationary
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdateTextBox(selectedTextBox.id, { isScrolling: true })
+                }
+                className={`px-2 py-0.5 font-bold border ${
+                  selectedTextBox.isScrolling
+                    ? 'bg-cyan-400 text-slate-950 border-white'
+                    : 'studio-btn text-purple-100'
+                }`}
+              >
+                Credits
+              </button>
+            </div>
             <button
               onClick={() => {
                 void sound3DMM.playUiWav('REMACTR.WAV');

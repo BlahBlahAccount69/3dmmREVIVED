@@ -91,9 +91,19 @@ export interface TdtTextEntity {
   keyframes: Record<number, KeyframePosition>;
 }
 
+export interface ScreenTextRun {
+  text: string;
+  fontName?: string;
+  fontSize?: number;
+  color?: string;
+  bold?: boolean;
+  italic?: boolean;
+}
+
 export interface ScreenTextBox {
   id: string;
   text: string;
+  runs?: ScreenTextRun[];
   fontName: string;
   fontSize?: number;
   color?: string;
@@ -116,6 +126,7 @@ export interface ImportedAudioCue {
   audioData: string; // Base64 Data URL for WAV/MP3/WebM
   midiData?: string; // Base64 Data URL for MIDS or SMF MIDI
   isMidi?: boolean;
+  isCustomAudio?: boolean;
   loop?: boolean;
   msndCno?: number;
   isStopper?: boolean;
@@ -139,6 +150,8 @@ export interface CameraCutEvent {
   pitch?: number;
 }
 
+export type SceneTransition = 'cut' | 'dissolve' | 'fadeToBlack' | 'fadeToWhite';
+
 export interface Scene {
   id: string;
   bkgdCno: number;
@@ -146,6 +159,7 @@ export interface Scene {
   icam: number;
   cameraAngle: CameraAngle;
   cameraCuts?: CameraCutEvent[];
+  transition?: SceneTransition;
   coordMode?: 'stage' | 'world';
   actors: ActorEntity[];
   props: PropEntity[];

@@ -469,7 +469,7 @@ async function parseMtrlToThree(
 
   return {
     material: new THREE.MeshStandardMaterial({
-      color: new THREE.Color(r / 255, g / 255, b / 255),
+      color: new THREE.Color().setRGB(r / 255, g / 255, b / 255, THREE.SRGBColorSpace),
       flatShading: false,
       roughness: 0.65,
       metalness: 0.08,
@@ -478,6 +478,22 @@ async function parseMtrlToThree(
     tmapCno: null,
     skinHex: null,
   };
+}
+
+export async function resolveMtrlHex(
+  mtrlCno: number,
+  palette: Palette256,
+  overrideArchive?: ChunkyFile
+): Promise<string | undefined> {
+  const mtrlsCn = await getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false).catch(() => null);
+  const srcArchive =
+    overrideArchive?.getChunkMeta('MTRL', mtrlCno) ? overrideArchive : mtrlsCn;
+  const meta = srcArchive?.getChunkMeta('MTRL', mtrlCno);
+  if (!srcArchive || !meta) return undefined;
+  const parsed = await parseMtrlToThree(srcArchive, meta, palette);
+  if (parsed.tmapCno !== null) return parsed.skinHex ?? undefined;
+  const std = parsed.material as THREE.MeshStandardMaterial;
+  return std.color ? '#' + std.color.getHexString() : undefined;
 }
 
 export async function loadDirectMtrl(
@@ -1171,17 +1187,28 @@ export function applyRigColorOverride(rig: TemplateRig, colorHex?: string) {
   if (colorHex) {
     _tintTmp.set(colorHex);
     for (let i = 0; i < meshes.length; i++) {
-      const mat = meshes[i].material as THREE.MeshStandardMaterial;
-      if (mat && mat.color) {
-        mat.color.copy(_tintTmp);
+      const mesh = meshes[i];
+      const mats = [
+        mesh.material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial | undefined,
+        mesh.userData.litMaterial as THREE.MeshStandardMaterial | undefined,
+        mesh.userData.unlitMaterial as THREE.MeshBasicMaterial | undefined,
+      ];
+      for (const mat of mats) {
+        if (mat && mat.color) mat.color.copy(_tintTmp);
       }
     }
   } else {
     for (let i = 0; i < meshes.length; i++) {
-      const mat = meshes[i].material as THREE.MeshStandardMaterial;
+      const mesh = meshes[i];
       const base = baseMaterialColors[i];
-      if (mat && mat.color && base) {
-        mat.color.copy(base);
+      if (!base) continue;
+      const mats = [
+        mesh.material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial | undefined,
+        mesh.userData.litMaterial as THREE.MeshStandardMaterial | undefined,
+        mesh.userData.unlitMaterial as THREE.MeshBasicMaterial | undefined,
+      ];
+      for (const mat of mats) {
+        if (mat && mat.color) mat.color.copy(base);
       }
     }
   }
@@ -1192,9 +1219,13 @@ export function applyGroupColorOverride(group: THREE.Group, colorHex?: string) {
   _tintTmp.set(targetHex);
   group.traverse((child) => {
     const mesh = child as THREE.Mesh;
-    const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
-    if (mat && mat.color) {
-      mat.color.copy(_tintTmp);
+    const mats = [
+      mesh.material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial | undefined,
+      mesh.userData.litMaterial as THREE.MeshStandardMaterial | undefined,
+      mesh.userData.unlitMaterial as THREE.MeshBasicMaterial | undefined,
+    ];
+    for (const mat of mats) {
+      if (mat && mat.color) mat.color.copy(_tintTmp);
     }
   });
 }
@@ -1629,8 +1660,13 @@ export function applyTdtActionTransform(
 }
 
 /**
- * Toggles between Classic Flat Shading (default when shading OFF, ONLY for untextured objects)
- * and Smooth Shading + Shadows (when shading ON) while keeping all materials lit in 3D space.
+ * Toggles between:
+ * - No Shading Mode (`enableShading === false`, default):
+ *   - Textured objects (`map !== null`): unlit `MeshBasicMaterial` (no lighting/shading attenuation)
+ *   - Untextured objects (`map === null`): lit `MeshStandardMaterial` with `flatShading: true`
+ *   - Shadows OFF
+ * - Smooth Shading + Shadows (`enableShading === true`):
+ *   - All objects use lit `MeshStandardMaterial` with `flatShading: false` and shadows ON.
  */
 export function applyObjectShadingMode(root: THREE.Object3D, enableShading: boolean) {
   root.userData.enableShading = enableShading;
@@ -1638,12 +1674,12 @@ export function applyObjectShadingMode(root: THREE.Object3D, enableShading: bool
     const mesh = child as THREE.Mesh;
     if (!mesh.isMesh) return;
 
-    const curMat = mesh.material as THREE.MeshStandardMaterial | undefined;
+    const curMat = mesh.material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial | undefined;
     if (!curMat) return;
 
     let litMat = mesh.userData.litMaterial as THREE.MeshStandardMaterial | undefined;
-    if (!litMat && curMat.isMeshStandardMaterial) {
-      litMat = curMat;
+    if (!litMat && (curMat as THREE.MeshStandardMaterial).isMeshStandardMaterial) {
+      litMat = curMat as THREE.MeshStandardMaterial;
       mesh.userData.litMaterial = litMat;
     }
     if (!litMat) return;
@@ -1651,15 +1687,47 @@ export function applyObjectShadingMode(root: THREE.Object3D, enableShading: bool
     if (curMat.color && litMat.color && curMat !== litMat) {
       litMat.color.copy(curMat.color);
     }
-    if (mesh.material !== litMat) {
-      mesh.material = litMat;
-    }
 
     const isTextured = Boolean(litMat.map);
-    const wantFlat = !enableShading && !isTextured;
-    if (litMat.flatShading !== wantFlat) {
-      litMat.flatShading = wantFlat;
-      litMat.needsUpdate = true;
+    if (enableShading) {
+      if (litMat.flatShading) {
+        litMat.flatShading = false;
+        litMat.needsUpdate = true;
+      }
+      if (mesh.material !== litMat) {
+        mesh.material = litMat;
+      }
+    } else if (isTextured) {
+      let unlitMat = mesh.userData.unlitMaterial as THREE.MeshBasicMaterial | undefined;
+      if (!unlitMat) {
+        unlitMat = new THREE.MeshBasicMaterial({
+          map: litMat.map,
+          color: litMat.color.clone(),
+          side: litMat.side,
+          transparent: litMat.transparent,
+          opacity: litMat.opacity,
+          alphaTest: litMat.alphaTest,
+        });
+        mesh.userData.unlitMaterial = unlitMat;
+      } else {
+        if (unlitMat.map !== litMat.map) {
+          unlitMat.map = litMat.map;
+          unlitMat.needsUpdate = true;
+        }
+        unlitMat.color.copy(litMat.color);
+        unlitMat.side = litMat.side;
+      }
+      if (mesh.material !== unlitMat) {
+        mesh.material = unlitMat;
+      }
+    } else {
+      if (!litMat.flatShading) {
+        litMat.flatShading = true;
+        litMat.needsUpdate = true;
+      }
+      if (mesh.material !== litMat) {
+        mesh.material = litMat;
+      }
     }
 
     mesh.castShadow = enableShading;

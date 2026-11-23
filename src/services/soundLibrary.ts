@@ -9,7 +9,68 @@ export interface CatalogSoundItem {
   name: string;
   category: 'sfx' | 'music' | 'speech';
   isMidi: boolean;
+  sampleFile?: string;
+  midiFileUrl?: string;
+  sourceLabel?: string;
 }
+
+export const SAMPLE_CUSTOM_AUDIO_ITEMS: CatalogSoundItem[] = [
+  // Custom Voices & SFX embedded inside sample .3MM movies
+  { cno: 900101, msndCno: 1, name: 'it worked!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900102, msndCno: 3, name: 'Follow me!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900103, msndCno: 4, name: 'Council of Drs', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900104, msndCno: 5, name: 'Hold On,...', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900105, msndCno: 7, name: 'What?', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900106, msndCno: 9, name: "No! You won't", category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900107, msndCno: 10, name: 'Oh but I will!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900108, msndCno: 11, name: 'Good.', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900109, msndCno: 12, name: 'Stop! Not so fast', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900110, msndCno: 13, name: 'Get Him!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900111, msndCno: 14, name: 'Nooo!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900112, msndCno: 16, name: 'well, hello', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900113, msndCno: 18, name: 'new creation', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900114, msndCno: 19, name: 'next time', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
+  { cno: 900201, msndCno: 1, name: 'What a day...', category: 'speech', isMidi: false, sampleFile: 'SPACE.3MM', sourceLabel: 'SPACE.3MM' },
+  { cno: 900202, msndCno: 2, name: 'I have', category: 'speech', isMidi: false, sampleFile: 'SPACE.3MM', sourceLabel: 'SPACE.3MM' },
+  { cno: 900301, msndCno: 0, name: 'Is anybody...', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900302, msndCno: 1, name: 'Ahhh! (Custom)', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900303, msndCno: 2, name: 'Whoh this place...', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900304, msndCno: 3, name: 'Now what did...', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900305, msndCno: 4, name: "Let's See...", category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900306, msndCno: 5, name: "That's not it...", category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900307, msndCno: 6, name: 'you gotta', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900308, msndCno: 7, name: 'Nope...', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900309, msndCno: 8, name: 'Hmmm', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900310, msndCno: 9, name: 'Hey, there...', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900311, msndCno: 10, name: 'Cool. Got it.', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900312, msndCno: 11, name: "Whoa. I'm out...", category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900313, msndCno: 15, name: "ok there's", category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900314, msndCno: 16, name: 'down the hall', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900401, msndCno: 0, name: 'Hey watch it!', category: 'speech', isMidi: false, sampleFile: 'THETHIEF.3MM', sourceLabel: 'THETHIEF.3MM' },
+  { cno: 900402, msndCno: 2, name: "You're coming", category: 'speech', isMidi: false, sampleFile: 'THETHIEF.3MM', sourceLabel: 'THETHIEF.3MM' },
+  { cno: 900501, msndCno: 0, name: 'static.wav', category: 'sfx', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
+  { cno: 900502, msndCno: 2, name: 'look3.wav', category: 'speech', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
+  { cno: 900503, msndCno: 4, name: 'mega.wav', category: 'speech', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
+  { cno: 900504, msndCno: 5, name: 'ebase.WAV', category: 'speech', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
+  { cno: 900601, msndCno: 0, name: "Where's my doggy", category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
+  { cno: 900602, msndCno: 1, name: 'Rover', category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
+  { cno: 900603, msndCno: 4, name: 'Yipee (Custom)', category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
+  // Custom Studio MIDI Music Tracks
+  { cno: 910001, msndCno: -1, name: 'BAKSTAGE.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/BAKSTAGE.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910002, msndCno: -1, name: 'BOOTHJAM.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/BOOTHJAM.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910003, msndCno: -1, name: 'CLOSET.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/CLOSET.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910004, msndCno: -1, name: 'COASTER.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/COASTER.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910005, msndCno: -1, name: 'FADER.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/FADER.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910006, msndCno: -1, name: 'IDEAS.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/IDEAS.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910007, msndCno: -1, name: 'JAMLOOP.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/JAMLOOP.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910008, msndCno: -1, name: 'LOBBY.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/LOBBY.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910009, msndCno: -1, name: 'PROJECT.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/PROJECT.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910010, msndCno: -1, name: 'SNACK.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/SNACK.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910011, msndCno: -1, name: 'SPLASH.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/SPLASH.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910012, msndCno: -1, name: 'STUDIO.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/STUDIO.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910013, msndCno: -1, name: 'TAG.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/TAG.MID', sourceLabel: 'Studio MIDI' },
+  { cno: 910014, msndCno: -1, name: 'THEATER.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/THEATER.MID', sourceLabel: 'Studio MIDI' },
+];
 
 const MS_ADPCM_ADAPTATION = [
   230, 230, 230, 230, 307, 409, 512, 614,
@@ -285,6 +346,7 @@ class Sound3DMMManager {
   private wavUrlCache = new Map<string, Promise<AudioBuffer | null>>();
   private msndBufferCache = new Map<number, Promise<AudioBuffer | null>>();
   private msndMidsCache = new Map<number, Promise<Uint8Array | null>>();
+  private sampleArchiveCache = new Map<string, Promise<ChunkyFile>>();
   private catalogPromise: Promise<CatalogSoundItem[]> | null = null;
   private activeSource: AudioBufferSourceNode | null = null;
   private activeUiSource: AudioBufferSourceNode | null = null;
@@ -478,13 +540,69 @@ class Sound3DMMManager {
         readList('SMTH', 'music'),
       ]);
 
-      return items;
+      return [...items, ...SAMPLE_CUSTOM_AUDIO_ITEMS];
     })().catch((err) => {
       this.catalogPromise = null;
       throw err;
     });
 
     return this.catalogPromise;
+  }
+
+  public getSampleArchive(sampleFile: string): Promise<ChunkyFile> {
+    let p = this.sampleArchiveCache.get(sampleFile);
+    if (!p) {
+      p = ChunkyFile.fromUrl(assetUrl(`3dmm/samples/${sampleFile}`), true).catch((err) => {
+        this.sampleArchiveCache.delete(sampleFile);
+        throw err;
+      });
+      this.sampleArchiveCache.set(sampleFile, p);
+    }
+    return p;
+  }
+
+  public async extractSoundItemCueData(
+    item: CatalogSoundItem
+  ): Promise<{ audioData: string; midiData?: string; isMidi: boolean; isCustomAudio: boolean; name?: string } | null> {
+    if (item.midiFileUrl) {
+      const res = await fetch(assetUrl(item.midiFileUrl));
+      if (!res.ok) return null;
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      return {
+        audioData: '',
+        midiData: `data:audio/midi;base64,${bytesToBase64(bytes)}`,
+        isMidi: true,
+        isCustomAudio: true,
+        name: item.name,
+      };
+    }
+    if (item.sampleFile) {
+      const sampleChunky = await this.getSampleArchive(item.sampleFile);
+      const ex = await this.extractMsndCueData(item.msndCno, sampleChunky);
+      if (!ex) return null;
+      return { ...ex, isCustomAudio: true, name: item.name || ex.name };
+    }
+    const ex = await this.extractMsndCueData(item.msndCno);
+    if (!ex) return null;
+    return { ...ex, isCustomAudio: false };
+  }
+
+  public async previewCatalogItem(item: CatalogSoundItem) {
+    if (item.midiFileUrl) {
+      await this.playMidiFileUrl(assetUrl(item.midiFileUrl), false);
+      return;
+    }
+    if (item.sampleFile) {
+      const ex = await this.extractSoundItemCueData(item);
+      if (ex?.midiData) {
+        const ctx = await this.ensureReadyCtx();
+        midiPlayer.playMidsBytes(base64ToBytes(ex.midiData), { loop: false, audioCtx: ctx, forceRestart: true });
+      } else if (ex?.audioData) {
+        await this.playBase64Audio(`sample_${item.cno}`, ex.audioData, false);
+      }
+      return;
+    }
+    await this.playCatalogMsnd(item.msndCno, false, true);
   }
 
   /**

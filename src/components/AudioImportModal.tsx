@@ -42,7 +42,8 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
     setIsProcessing(true);
     setErrorMsg(null);
     try {
-      const extracted = await sound3DMM.extractMsndCueData(item.msndCno);
+      const extracted = await sound3DMM.extractSoundItemCueData(item);
+      const isCustom = Boolean(item.sampleFile || item.midiFileUrl || extracted?.isCustomAudio);
       onAddAudioCue({
         id: 'snd_' + Math.random().toString(36).substring(2, 9),
         frame: currentFrame,
@@ -50,13 +51,14 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
         audioData: extracted?.audioData || '',
         midiData: extracted?.midiData,
         isMidi: item.isMidi || extracted?.isMidi,
+        isCustomAudio: isCustom,
         loop: item.isMidi,
-        msndCno: item.msndCno,
+        msndCno: isCustom ? undefined : item.msndCno,
       });
-      void sound3DMM.playCatalogMsnd(item.msndCno, false);
+      void sound3DMM.previewCatalogItem(item);
       onClose();
     } catch {
-      setErrorMsg('Could not extract sound/MIDI from SNDS.3CN.');
+      setErrorMsg('Could not extract sound/MIDI from archive.');
     } finally {
       setIsProcessing(false);
     }
@@ -180,10 +182,13 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
                         <Volume2 size={13} className="text-cyan-300 shrink-0" />
                       )}
                       <span className="truncate font-semibold">{item.name}</span>
+                      {item.sourceLabel && (
+                        <span className="text-[10px] text-purple-300 shrink-0">[{item.sourceLabel}]</span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button
-                        onClick={() => void sound3DMM.playCatalogMsnd(item.msndCno, false, true)}
+                        onClick={() => void sound3DMM.previewCatalogItem(item)}
                         className="studio-btn px-2 py-0.5 text-[11px] flex items-center gap-1"
                         title="Preview"
                       >

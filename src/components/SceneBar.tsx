@@ -1,9 +1,16 @@
 import React, { useState } from 'react';
-import { Scene } from '../types/movie';
+import { Scene, SceneTransition } from '../types/movie';
 import { CatalogSceneItem } from '../services/threeDmmEngine';
 import { sound3DMM } from '../services/soundLibrary';
 import { Plus } from 'lucide-react';
 import { assetUrl } from '../utils/assetUrl';
+
+const TRANSITION_LABELS: Record<SceneTransition, { short: string; label: string }> = {
+  cut: { short: 'Cut', label: 'Cut' },
+  fadeToBlack: { short: 'FadeB', label: 'Fade to Black' },
+  fadeToWhite: { short: 'FadeW', label: 'Fade to White' },
+  dissolve: { short: 'Dis', label: 'Dissolve' },
+};
 
 interface SceneBarProps {
   scenes: Scene[];
@@ -12,6 +19,7 @@ interface SceneBarProps {
   onSelectScene: (index: number) => void;
   onAddOrOverwriteScene: (chosen: CatalogSceneItem) => void;
   onUpdateCurrentScene: (chosen: CatalogSceneItem) => void;
+  onUpdateSceneTransition?: (transition: SceneTransition) => void;
 }
 
 export const SceneBar: React.FC<SceneBarProps> = ({
@@ -21,6 +29,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
   onSelectScene,
   onAddOrOverwriteScene,
   onUpdateCurrentScene,
+  onUpdateSceneTransition,
 }) => {
   const [showAddModal, setShowAddModal] = useState(false);
 
@@ -44,6 +53,8 @@ export const SceneBar: React.FC<SceneBarProps> = ({
         {scenes.map((scene, idx) => {
           const isActive = idx === currentSceneIndex;
           const count = scene.actors.length + scene.props.length;
+          const tKey: SceneTransition = scene.transition || 'dissolve';
+          const tInfo = TRANSITION_LABELS[tKey] || TRANSITION_LABELS.dissolve;
 
           return (
             <button
@@ -52,6 +63,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
                 void sound3DMM.playUiWav('DROPDN.WAV');
                 onSelectScene(idx);
               }}
+              title={`Scene ${idx + 1}: ${scene.sceneName} — Transition in: ${tInfo.label}`}
               className={`px-2.5 py-0.5 text-xs flex items-center gap-1.5 shrink-0 ${
                 isActive
                   ? 'bg-[#6535b8] text-amber-200 font-bold border-2 border-amber-300 shadow'
@@ -60,6 +72,9 @@ export const SceneBar: React.FC<SceneBarProps> = ({
             >
               <span>
                 {idx + 1}. {scene.sceneName}
+              </span>
+              <span className="px-1 bg-black/45 text-[9px] text-cyan-200 font-mono">
+                {tInfo.short}
               </span>
               <span className="px-1 bg-black/50 text-[10px] text-amber-300 font-mono">
                 {count}
@@ -81,32 +96,54 @@ export const SceneBar: React.FC<SceneBarProps> = ({
         </button>
       </div>
 
-      {/* Quick Scene Setting Switcher (All 12 real BKGDS.3CN stages) */}
+      {/* Quick Scene Setting & Transition Switchers */}
       {scenes.length > 0 ? (
-        <div className="flex items-center gap-1.5 text-xs text-amber-200 max-w-full min-w-0">
-          <span className="font-bold shrink-0">Setting:</span>
-          <select
-            value={currentScene?.bkgdCno ?? 0}
-            onChange={(e) => {
-              const cno = Number(e.target.value);
-              const found = catalogScenes.find((s) => s.bkgdCno === cno);
-              if (found) {
-                void sound3DMM.playUiWav('DROPDN.WAV');
-                onUpdateCurrentScene(found);
-              }
-            }}
-            className="studio-well px-2 py-0.5 text-xs text-white focus:outline-none cursor-pointer max-w-full min-w-0"
-          >
-            {catalogScenes.length > 0 ? (
-              catalogScenes.map((st) => (
-                <option key={st.bkgdCno} value={st.bkgdCno}>
-                  {st.name} ({st.views.length} views)
-                </option>
-              ))
-            ) : (
-              <option value={currentScene?.bkgdCno ?? 0}>{currentScene?.sceneName || 'MY-Street'}</option>
-            )}
-          </select>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-amber-200 max-w-full min-w-0">
+          <div className="flex items-center gap-1.5 max-w-full min-w-0">
+            <span className="font-bold shrink-0">Setting:</span>
+            <select
+              value={currentScene?.bkgdCno ?? 0}
+              onChange={(e) => {
+                const cno = Number(e.target.value);
+                const found = catalogScenes.find((s) => s.bkgdCno === cno);
+                if (found) {
+                  void sound3DMM.playUiWav('DROPDN.WAV');
+                  onUpdateCurrentScene(found);
+                }
+              }}
+              className="studio-well px-2 py-0.5 text-xs text-white focus:outline-none cursor-pointer max-w-full min-w-0"
+            >
+              {catalogScenes.length > 0 ? (
+                catalogScenes.map((st) => (
+                  <option key={st.bkgdCno} value={st.bkgdCno}>
+                    {st.name} ({st.views.length} views)
+                  </option>
+                ))
+              ) : (
+                <option value={currentScene?.bkgdCno ?? 0}>{currentScene?.sceneName || 'MY-Street'}</option>
+              )}
+            </select>
+          </div>
+          {onUpdateSceneTransition && (
+            <div className="flex items-center gap-1.5 max-w-full min-w-0">
+              <span className="font-bold shrink-0 text-cyan-200">Transition:</span>
+              <select
+                aria-label="Scene Transition"
+                title="Transition when entering this scene"
+                value={currentScene?.transition || 'dissolve'}
+                onChange={(e) => {
+                  void sound3DMM.playUiWav('DROPDN.WAV');
+                  onUpdateSceneTransition(e.target.value as SceneTransition);
+                }}
+                className="studio-well px-2 py-0.5 text-xs text-cyan-100 focus:outline-none cursor-pointer"
+              >
+                <option value="dissolve">Dissolve</option>
+                <option value="cut">Cut</option>
+                <option value="fadeToBlack">Fade to Black</option>
+                <option value="fadeToWhite">Fade to White</option>
+              </select>
+            </div>
+          )}
         </div>
       ) : (
         <div className="text-[11px] font-bold text-amber-300 px-2 py-0.5 studio-well max-w-full min-w-0">

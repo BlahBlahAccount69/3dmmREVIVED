@@ -8,6 +8,7 @@ import {
   PropAction,
   PropEntity,
   Scene,
+  SceneTransition,
   ScreenTextBox,
   TdtAction,
   TdtTextEntity,
@@ -32,6 +33,7 @@ import {
   resolveActiveCameraAtFrame,
   resolveInterpolatedKeyframe,
   StageEntityType,
+  TransitionOverlayState,
   Viewport3D,
 } from './components/Viewport3D';
 import { SceneBar } from './components/SceneBar';
@@ -79,6 +81,21 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stageViewRef = useRef<LoadedBackgroundView | null>(null);
+  const stageCaptureRef = useRef<(() => string | null) | null>(null);
+  const [transitionOverlay, setTransitionOverlay] = useState<TransitionOverlayState | null>(null);
+  const activeTransitionRef = useRef<{
+    kind: SceneTransition;
+    phase: 'out' | 'in';
+    elapsed: number;
+    duration: number;
+    targetSceneIndex: number;
+    snapshotDataUrl?: string | null;
+  } | null>(null);
+
+  const clearTransition = () => {
+    activeTransitionRef.current = null;
+    setTransitionOverlay(null);
+  };
 
   const currentScene: Scene | undefined = movie.scenes[currentSceneIndex] || movie.scenes[0];
   const hasScene = Boolean(currentScene);
@@ -161,6 +178,61 @@ export default function App() {
 
       const scenes = movieRef.current.scenes;
       if (scenes && scenes.length > 0) {
+        // Handle active transition overlay (Fade to Black / Fade to White / Dissolve)
+        const tr = activeTransitionRef.current;
+        if (tr) {
+          tr.elapsed += dt;
+          if (tr.phase === 'out') {
+            const p = Math.min(1, tr.elapsed / Math.max(0.05, tr.duration));
+            setTransitionOverlay({ mode: tr.kind, opacity: p });
+            if (tr.elapsed >= tr.duration) {
+              const nextSceneIdx = tr.targetSceneIndex;
+              sound3DMM.stopLoopingSfx();
+              const nextSceneObj = scenes[nextSceneIdx];
+              const holdOnZero = Boolean(
+                nextSceneObj?.textBoxes?.some(
+                  (tb) => tb.isScrolling && 0 >= tb.startFrame && 0 <= tb.endFrame
+                )
+              );
+              playheadRef.current = {
+                sceneIndex: nextSceneIdx,
+                frame: 0,
+                renderFrame: 0,
+                scrollHoldActive: holdOnZero,
+                scrollElapsedSec: 0,
+                completedScrollIds: {},
+              };
+              setCurrentSceneIndex(nextSceneIdx);
+              setSelectedEntityId(null);
+              setSelectedEntityType(null);
+              setCurrentFrame(0);
+              setRenderFrame(0);
+              setStatusMessage(
+                `Playing Scene ${nextSceneIdx + 1}/${scenes.length}: ${nextSceneObj.sceneName}`
+              );
+              triggerAudiosForFrame(nextSceneObj, 0);
+              tr.phase = 'in';
+              tr.elapsed = 0;
+              tr.duration = 0.35;
+              setTransitionOverlay({ mode: tr.kind, opacity: 1 });
+            }
+            rafId = window.requestAnimationFrame(step);
+            return;
+          } else {
+            const p = Math.max(0, 1 - tr.elapsed / Math.max(0.05, tr.duration));
+            if (p <= 0.005) {
+              activeTransitionRef.current = null;
+              setTransitionOverlay(null);
+            } else {
+              setTransitionOverlay({
+                mode: tr.kind,
+                opacity: p,
+                snapshotDataUrl: tr.snapshotDataUrl,
+              });
+            }
+          }
+        }
+
         let { sceneIndex, frame: intFrame, renderFrame: subFrame } = playheadRef.current;
         if (sceneIndex < 0 || sceneIndex >= scenes.length) sceneIndex = 0;
 
@@ -215,7 +287,42 @@ export default function App() {
 
         if (nextIntFrame > activeScene.totalFrames) {
           if (sceneIndex + 1 < scenes.length) {
-            nextSceneIndex = sceneIndex + 1;
+            const candidateNext = sceneIndex + 1;
+            const transKind: SceneTransition = scenes[candidateNext]?.transition || 'dissolve';
+
+            if (transKind === 'fadeToBlack' || transKind === 'fadeToWhite') {
+              playheadRef.current.frame = activeScene.totalFrames;
+              playheadRef.current.renderFrame = activeScene.totalFrames;
+              activeTransitionRef.current = {
+                kind: transKind,
+                phase: 'out',
+                elapsed: 0,
+                duration: 0.32,
+                targetSceneIndex: candidateNext,
+              };
+              setTransitionOverlay({ mode: transKind, opacity: 0.02 });
+              rafId = window.requestAnimationFrame(step);
+              return;
+            }
+
+            if (transKind === 'dissolve') {
+              const snap = stageCaptureRef.current?.() || null;
+              activeTransitionRef.current = {
+                kind: 'dissolve',
+                phase: 'in',
+                elapsed: 0,
+                duration: 0.55,
+                targetSceneIndex: candidateNext,
+                snapshotDataUrl: snap,
+              };
+              setTransitionOverlay({
+                mode: 'dissolve',
+                opacity: 1,
+                snapshotDataUrl: snap,
+              });
+            }
+
+            nextSceneIndex = candidateNext;
             nextRender = 0;
             nextIntFrame = 0;
             playheadRef.current.completedScrollIds = {};
@@ -227,6 +334,7 @@ export default function App() {
           } else {
             // Reached the end of the final scene: stop playback cleanly without repeating
             const endFrame = activeScene.totalFrames;
+            clearTransition();
             playheadRef.current = {
               sceneIndex,
               frame: endFrame,
@@ -274,6 +382,7 @@ export default function App() {
     if (!hasScene) return;
     if (isPlaying) {
       sound3DMM.stopAll();
+      clearTransition();
       const activeScene = movieRef.current.scenes[playheadRef.current.sceneIndex];
       const maxF = activeScene ? activeScene.totalFrames : 0;
       const stoppedFrame = Math.max(
@@ -451,6 +560,25 @@ export default function App() {
       cameraAngle: { yaw: 0, pitch: 0 },
     };
     setMovie({ ...movie, scenes: updated });
+  };
+
+  const handleUpdateSceneTransition = (transition: SceneTransition) => {
+    if (!currentScene) return;
+    const updated = [...movie.scenes];
+    updated[currentSceneIndex] = {
+      ...currentScene,
+      transition,
+    };
+    setMovie({ ...movie, scenes: updated });
+    const label =
+      transition === 'cut'
+        ? 'Cut'
+        : transition === 'fadeToBlack'
+          ? 'Fade to Black'
+          : transition === 'fadeToWhite'
+            ? 'Fade to White'
+            : 'Dissolve';
+    setStatusMessage(`Set transition entering Scene ${currentSceneIndex + 1} to ${label}.`);
   };
 
   // Supports BOTH setting View at frame 0 AND adding camera angle cuts at any frame > 0!
@@ -839,13 +967,16 @@ export default function App() {
         ),
       };
     }
-    return {
-      ...sc,
-      totalFrames: nextTotal,
-      tdtTexts: (sc.tdtTexts || []).map((t) =>
-        t.id === entityId ? { ...t, keyframes: updater(t.keyframes) } : t
-      ),
-    };
+    if (type === 'tdt') {
+      return {
+        ...sc,
+        totalFrames: nextTotal,
+        tdtTexts: (sc.tdtTexts || []).map((t) =>
+          t.id === entityId ? { ...t, keyframes: updater(t.keyframes) } : t
+        ),
+      };
+    }
+    return sc;
   };
 
   const handleBeginRecordingAtFrame = (
@@ -1662,6 +1793,7 @@ export default function App() {
         currentSceneIndex={currentSceneIndex}
         onSelectScene={(idx) => {
           sound3DMM.stopMusic();
+          clearTransition();
           setIsPlaying(false);
           setCurrentSceneIndex(idx);
           setCurrentFrame(0);
@@ -1680,6 +1812,7 @@ export default function App() {
         }}
         onAddOrOverwriteScene={handleAddOrOverwriteScene}
         onUpdateCurrentScene={handleUpdateCurrentScene}
+        onUpdateSceneTransition={handleUpdateSceneTransition}
       />
 
       {movie.plot && showPlotBanner && (
@@ -1759,6 +1892,9 @@ export default function App() {
                   setSelectedEntityId(id);
                   setSelectedEntityType(type);
                 }}
+                onUpdateTextBox={handleUpdateTextBox}
+                transitionOverlay={transitionOverlay}
+                stageCaptureRef={stageCaptureRef}
                 onStageViewReady={(bgView) => {
                   stageViewRef.current = bgView;
                 }}
@@ -2031,7 +2167,7 @@ export default function App() {
               <div className="flex flex-col gap-0.5">
                 <span className="font-bold text-amber-200 text-xs">Smooth Shading &amp; Shadows</span>
                 <span className="text-[11px] text-purple-200 leading-snug">
-                  When OFF (default), untextured objects use classic flat shading (textured objects stay smooth) with no floor shadows. Turn ON for smooth shading &amp; shadows.
+                  When OFF (default — No Shading Mode), textured objects have no shading (unlit) and untextured objects use classic flat shading, with shadows OFF. Turn ON for smooth shading &amp; shadows.
                 </span>
               </div>
               <input
@@ -2040,7 +2176,7 @@ export default function App() {
                 onChange={(e) => {
                   const next = e.target.checked;
                   setEnableShading(next);
-                  setStatusMessage(`Settings: ${next ? 'Smooth Shading & Shadows ON' : 'Flat Shading (untextured objects) / Shadows OFF'}.`);
+                  setStatusMessage(`Settings: ${next ? 'Smooth Shading & Shadows ON' : 'No Shading Mode (unlit textures, flat untextured, shadows OFF)'}.`);
                 }}
                 className="mt-1 w-4 h-4 accent-amber-400 shrink-0 cursor-pointer"
               />

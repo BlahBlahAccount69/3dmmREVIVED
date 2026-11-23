@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { ChunkKid } from './chunkyParser';
 import { loadBackgroundView, LoadedBackgroundView, loadTemplate, tdtActionToAnid } from './threeDmmEngine';
 import { loadBasePalette } from './mbmpDecoder';
+import { parseSmfToEvents } from './midiPlayer';
 import {
   KeyframePosition,
   Movie,
@@ -120,6 +121,39 @@ function base64ToBytes(dataUrlOrB64: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+function writeVarInt(buf: number[], val: number) {
+  let v = Math.max(0, Math.round(val)) >>> 0;
+  const bytes: number[] = [v & 0x7f];
+  v >>>= 7;
+  while (v > 0) {
+    bytes.push((v & 0x7f) | 0x80);
+    v >>>= 7;
+  }
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    buf.push(bytes[i]);
+  }
+}
+
+function smfToMidsBytes(smfBytes: Uint8Array): Uint8Array {
+  const { events } = parseSmfToEvents(smfBytes);
+  const out: number[] = [];
+  let prevMs = 0;
+  for (const ev of events) {
+    const curMs = Math.max(prevMs, Math.round(ev.timeMs));
+    const deltaMs = curMs - prevMs;
+    prevMs = curMs;
+    writeVarInt(out, deltaMs);
+    out.push(ev.status & 0xff, ev.data1 & 0x7f);
+    const evType = ev.status & 0xf0;
+    if (evType !== 0xc0 && evType !== 0xd0) {
+      out.push(ev.data2 & 0x7f);
+    }
+  }
+  // End-of-track meta event: delta=0, ff 2f 00
+  out.push(0x00, 0xff, 0x2f, 0x00);
+  return new Uint8Array(out);
 }
 
 class ChunkyBuilder {
@@ -520,6 +554,7 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
     for (const cue of scene.audios) {
       let targetMsndCno = cue.msndCno ?? -1;
       const isCustomPayload =
+        Boolean(cue.isCustomAudio) ||
         targetMsndCno < 0 ||
         Boolean(cue.audioData && cue.audioData.includes('(8-bit)'));
 
@@ -527,7 +562,14 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
         const msndKids: ChunkKid[] = [];
         const isMidi = Boolean(cue.midiData);
         if (cue.midiData) {
-          const midsBytes = base64ToBytes(cue.midiData);
+          const rawMidi = base64ToBytes(cue.midiData);
+          const isSmf =
+            rawMidi.length >= 4 &&
+            rawMidi[0] === 0x4d &&
+            rawMidi[1] === 0x54 &&
+            rawMidi[2] === 0x68 &&
+            rawMidi[3] === 0x64;
+          const midsBytes = isSmf ? smfToMidsBytes(rawMidi) : rawMidi;
           const midsCno = builder.addChunk('MIDS', midsBytes, cue.filename);
           msndKids.push({ ctg: 'MIDS', cno: midsCno, chid: 0 });
         } else if (cue.audioData) {
@@ -725,9 +767,8 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
           const e = new Uint8Array(8);
           const edv = new DataView(e.buffer);
           edv.setUint32(0, 0, true);
-          e[3] = 3; // foreground color palette index
-          edv.setInt16(4, findClosestPaletteIndex(palette, tb.color), true);
-          edv.setInt16(6, 0, true);
+          e[3] = 3; // foreground color palette ACR
+          edv.setUint32(4, 0xfe000000 | findClosestPaletteIndex(palette, tb.color), true);
           glmpEntries.push(e);
         }
         if (glmpEntries.length > 0) {
@@ -763,7 +804,15 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
     scenBuf[3] = 3;
     scenDv.setInt32(4, nfrmLast, true);
     scenDv.setInt32(8, nfrmFirst, true);
-    scenDv.setInt32(12, 3, true);
+    const transCode =
+      scene.transition === 'cut'
+        ? 0
+        : scene.transition === 'fadeToBlack'
+          ? 1
+          : scene.transition === 'fadeToWhite'
+            ? 2
+            : 3;
+    scenDv.setInt32(12, transCode, true);
 
     const scenCno = builder.addChunk('SCEN', scenBuf, scene.sceneName, scenChildKids);
     scenKids.push({ ctg: 'SCEN', cno: scenCno, chid: sIdx });

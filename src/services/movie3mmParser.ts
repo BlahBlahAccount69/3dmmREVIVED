@@ -9,7 +9,9 @@ import {
   PropActionKeyframe,
   PropEntity,
   Scene,
+  SceneTransition,
   ScreenTextBox,
+  ScreenTextRun,
   TdtTextEntity,
 } from '../types/movie';
 import { ChunkyFile } from './chunkyParser';
@@ -22,6 +24,7 @@ import {
   loadThreeDmmCatalog,
   normalizeTdtActionName,
   ParsedAction,
+  resolveMtrlHex,
 } from './threeDmmEngine';
 import { sound3DMM } from './soundLibrary';
 import { loadBasePalette } from './mbmpDecoder';
@@ -153,6 +156,15 @@ export async function loadOfficial3mmMovie(
     const sDv = new DataView(scenBytes.buffer, scenBytes.byteOffset, scenBytes.byteLength);
     const nfrmLast = sDv.getInt32(4, true);
     const nfrmFirst = sDv.getInt32(8, true);
+    const rawTransition = scenBytes.length >= 16 ? sDv.getInt32(12, true) : 3;
+    const transition: SceneTransition =
+      rawTransition === 0
+        ? 'cut'
+        : rawTransition === 1
+          ? 'fadeToBlack'
+          : rawTransition === 2
+            ? 'fadeToWhite'
+            : 'dissolve';
     const totalFrames = Math.max(1, Math.min(1800, nfrmLast - nfrmFirst + 1));
 
     const matchedBg = findMatchingBackground(scenMeta.name || '', catalog.scenes);
@@ -263,6 +275,22 @@ export async function loadOfficial3mmMovie(
     const tdtTexts: TdtTextEntity[] = [];
     const textBoxes: ScreenTextBox[] = [];
 
+    const acrToHex = (acr: number): string | undefined => {
+      if (acr === 0xffffffff || acr === 0) return undefined;
+      const hi = acr >>> 24;
+      if (hi === 0xfe || hi === 0xfd) {
+        return socpalHex(acr & 0xff);
+      }
+      // Low 16-bit palette index fallback for legacy writers
+      if (hi === 0 && (acr & 0xffff00) === 0 && (acr & 0xff) > 0) {
+        return socpalHex(acr & 0xff);
+      }
+      const r = acr & 0xff;
+      const g = (acr >>> 8) & 0xff;
+      const b = (acr >>> 16) & 0xff;
+      return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
+    };
+
     // Parse 2D Text Boxes (SCEN -> TBOX -> RTXT -> TEXT) for credits & captions
     const tboxKids = chunky.findKids(scenMeta, 'TBOX');
     for (let tIdx = 0; tIdx < tboxKids.length; tIdx++) {
@@ -287,16 +315,13 @@ export async function loadOfficial3mmMovie(
       for (const rtxKid of chunky.findKids(tbMeta, 'RTXT')) {
         const rtxBytes = await chunky.readChunk('RTXT', rtxKid.meta.cno);
         const rtxDv = new DataView(rtxBytes.buffer, rtxBytes.byteOffset, rtxBytes.byteLength);
-        let fontName = 'Comic Sans MS';
+        let defaultFontName = 'Comic Sans MS';
         let baseFontSize = rtxBytes.length >= 12 ? rtxDv.getInt32(8, true) || 14 : 14;
         if (baseFontSize < 8 || baseFontSize > 72) baseFontSize = 14;
 
         let bgColor: string | undefined;
         if (rtxBytes.length >= 16) {
-          const bgAcr = rtxDv.getUint32(12, true);
-          if ((bgAcr >>> 24) === 0xfe) {
-            bgColor = socpalHex(bgAcr & 0xff);
-          }
+          bgColor = acrToHex(rtxDv.getUint32(12, true));
         }
 
         if (rtxBytes.length >= 20) {
@@ -308,11 +333,11 @@ export async function loadOfficial3mmMovie(
               .join('')
               .replace(/\0/g, '')
               .trim();
-            if (parsedFont) fontName = parsedFont;
+            if (parsedFont) defaultFontName = parsedFont;
           }
         }
 
-        // Parse child AGPA font table & GLMP rich-text runs (size, bold, italic, font family, color)
+        // Parse child AGPA font table
         const agpaFonts = new Map<number, string>();
         for (const agKid of chunky.findKids(rtxKid.meta, 'AGPA')) {
           const agBytes = await chunky.readChunk('AGPA', agKid.meta.cno);
@@ -330,83 +355,154 @@ export async function loadOfficial3mmMovie(
           }
         }
 
-        let fontSize = baseFontSize;
-        let bold = false;
-        let italic = false;
-        let color: string | undefined;
-
-        const glmpKid = chunky.findKid(rtxKid.meta, 'GLMP');
-        if (glmpKid) {
-          const glmp = parseGL(await chunky.readChunk('GLMP', glmpKid.cno));
-          let sawChp = false;
-          let sawFont = false;
-          let sawColor = false;
-          for (let gi = 0; gi < glmp.count; gi++) {
-            const go = glmp.entryOffset(gi);
-            const tag = glmp.data[go + 3];
-            const a = glmp.dv.getInt16(go + 4, true);
-            const b = glmp.dv.getInt16(go + 6, true);
-            if (tag === 1 && !sawChp) {
-              bold = (a & 1) !== 0;
-              italic = (a & 2) !== 0;
-              fontSize = Math.max(8, Math.min(72, baseFontSize + b));
-              sawChp = true;
-            } else if (tag === 2 && a > 0 && !sawFont) {
-              const agName = agpaFonts.get(a);
-              if (agName) {
-                fontName = agName;
-                sawFont = true;
-              }
-            } else if (tag === 3 && a > 0 && !sawColor) {
-              color = socpalHex(a & 0xff);
-              sawColor = true;
-            }
-          }
-        }
-
-        const textParts: string[] = [];
+        // Collect raw TEXT string keeping exact char offsets for GLMP runs
+        const rawTextChunks: string[] = [];
         for (const txtKid of chunky.findKids(rtxKid.meta, 'TEXT')) {
           const txtBytes = await chunky.readChunk('TEXT', txtKid.meta.cno);
           const startOff = txtBytes.length >= 2 && txtBytes[0] === 3 && txtBytes[1] === 3 ? 2 : 0;
-          const decoded = Array.from(txtBytes.subarray(startOff), (b) => {
+          const decodedRaw = Array.from(txtBytes.subarray(startOff), (b) => {
             if (b === 0x95) return '•';
             if (b === 0x93 || b === 0x94) return '"';
             if (b === 0x91 || b === 0x92) return "'";
             if (b === 0x96 || b === 0x97) return '-';
             return String.fromCharCode(b);
-          })
-            .join('')
-            .replace(/\r\n/g, '\n')
-            .replace(/\r/g, '\n');
-          if (decoded.trim().length > 0) textParts.push(decoded);
+          }).join('');
+          if (decodedRaw.length > 0) rawTextChunks.push(decodedRaw);
         }
 
-        if (textParts.length > 0) {
-          const joinedText = textParts.join('\n');
-          const isCreditsScroll =
-            explicitScrollFlag === 1 ||
-            (fStory === 0 &&
-              ((tbLast >= 2147483640 &&
-                (joinedText.includes('\n') || startFrame >= Math.max(0, totalFrames - 2))) ||
-                (joinedText.includes('\n') && bottom - top >= 48)));
-          textBoxes.push({
-            id: `tbox_${sIdx}_${tIdx}_${tbMeta.cno}`,
-            text: joinedText,
-            fontName,
-            fontSize,
-            color,
-            bgColor,
-            bold,
-            italic,
-            startFrame,
-            endFrame,
-            left,
-            top,
-            right,
-            bottom,
-            isScrolling: isCreditsScroll,
-          });
+        const rawCombined = rawTextChunks.join('\n').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        if (rawCombined.trim().length === 0) continue;
+
+        interface GlmpEvent {
+          cp: number;
+          order: number;
+          tag: number;
+          a: number;
+          b: number;
+          u32: number;
         }
+        const glmpEvents: GlmpEvent[] = [];
+        const glmpKid = chunky.findKid(rtxKid.meta, 'GLMP');
+        if (glmpKid) {
+          const glmp = parseGL(await chunky.readChunk('GLMP', glmpKid.cno));
+          for (let gi = 0; gi < glmp.count; gi++) {
+            const go = glmp.entryOffset(gi);
+            const cp =
+              glmp.data[go] | (glmp.data[go + 1] << 8) | (glmp.data[go + 2] << 16);
+            const tag = glmp.data[go + 3];
+            const a = glmp.dv.getInt16(go + 4, true);
+            const b = glmp.dv.getInt16(go + 6, true);
+            const u32 = glmp.dv.getUint32(go + 4, true);
+            glmpEvents.push({ cp, order: gi, tag, a, b, u32 });
+          }
+          glmpEvents.sort((x, y) => x.cp - y.cp || x.order - y.order);
+        }
+
+        // Build exact character-range runs from GLMP events
+        let curFont = defaultFontName;
+        let curSize = baseFontSize;
+        let curBold = false;
+        let curItalic = false;
+        let curColor: string | undefined;
+
+        const applyGlmpEv = (ev: GlmpEvent) => {
+          if (ev.tag === 1) {
+            curBold = (ev.a & 1) !== 0;
+            curItalic = (ev.a & 2) !== 0;
+            curSize = Math.max(8, Math.min(72, baseFontSize + ev.b));
+          } else if (ev.tag === 2) {
+            const agName = ev.a > 0 ? agpaFonts.get(ev.a) : agpaFonts.get(1);
+            if (agName) curFont = agName;
+          } else if (ev.tag === 3) {
+            curColor = acrToHex(ev.u32);
+          }
+        };
+
+        const runs: ScreenTextRun[] = [];
+        if (glmpEvents.length > 0) {
+          let cursor = 0;
+          let idx = 0;
+          while (idx < glmpEvents.length && glmpEvents[idx].cp <= 0) {
+            applyGlmpEv(glmpEvents[idx]);
+            idx++;
+          }
+          while (idx < glmpEvents.length) {
+            const nextCp = Math.min(rawCombined.length, glmpEvents[idx].cp);
+            if (nextCp > cursor) {
+              runs.push({
+                text: rawCombined.slice(cursor, nextCp),
+                fontName: curFont,
+                fontSize: curSize,
+                color: curColor,
+                bold: curBold,
+                italic: curItalic,
+              });
+              cursor = nextCp;
+            }
+            while (idx < glmpEvents.length && glmpEvents[idx].cp <= nextCp) {
+              applyGlmpEv(glmpEvents[idx]);
+              idx++;
+            }
+          }
+          if (cursor < rawCombined.length) {
+            runs.push({
+              text: rawCombined.slice(cursor),
+              fontName: curFont,
+              fontSize: curSize,
+              color: curColor,
+              bold: curBold,
+              italic: curItalic,
+            });
+          }
+        }
+
+        const primaryRun =
+          runs.find((r) => r.text.trim().length > 0) ||
+          runs[0] || {
+            text: rawCombined,
+            fontName: curFont,
+            fontSize: curSize,
+            color: curColor,
+            bold: curBold,
+            italic: curItalic,
+          };
+
+        const hasMultiStyleRuns =
+          runs.length > 1 &&
+          runs.some(
+            (r) =>
+              r.fontName !== primaryRun.fontName ||
+              r.fontSize !== primaryRun.fontSize ||
+              r.color !== primaryRun.color ||
+              r.bold !== primaryRun.bold ||
+              r.italic !== primaryRun.italic
+          );
+
+        const isCreditsScroll =
+          explicitScrollFlag === 1 ||
+          (fStory === 0 &&
+            ((tbLast >= 2147483640 &&
+              (rawCombined.includes('\n') || startFrame >= Math.max(0, totalFrames - 2))) ||
+              (rawCombined.includes('\n') && bottom - top >= 48)));
+
+        textBoxes.push({
+          id: `tbox_${sIdx}_${tIdx}_${tbMeta.cno}`,
+          text: rawCombined,
+          ...(hasMultiStyleRuns ? { runs } : {}),
+          fontName: primaryRun.fontName || defaultFontName,
+          fontSize: primaryRun.fontSize ?? baseFontSize,
+          color: primaryRun.color,
+          bgColor,
+          bold: Boolean(primaryRun.bold),
+          italic: Boolean(primaryRun.italic),
+          startFrame,
+          endFrame,
+          left,
+          top,
+          right,
+          bottom,
+          isScrolling: isCreditsScroll,
+        });
       }
     }
 
@@ -621,7 +717,7 @@ export async function loadOfficial3mmMovie(
                   break;
                 }
                 case 2: {
-                  // aetCost (supports both CMTL cmids and direct MTRLS.3CN mtrlCno overrides!)
+                  // aetCost (supports both CMTL cmids and direct MTRL mtrlCno overrides, including per-frame switches)
                   if (ev.varLength >= 8) {
                     const ibset = gg.dv.getInt32(ev.varOffset, true);
                     const cmidOrDummy = gg.dv.getInt32(ev.varOffset + 4, true);
@@ -634,9 +730,7 @@ export async function loadOfficial3mmMovie(
                       const mCtg = readTagReversed(gg.data, ev.varOffset + 20);
                       const mtrlCno = gg.dv.getUint32(ev.varOffset + 24, true);
                       if (mCtg === 'MTRL') {
-                        const ex = costumeMtrls.findIndex((m) => m.ibset === ibset);
-                        if (ex >= 0) costumeMtrls[ex] = { ibset, mtrlCno };
-                        else costumeMtrls.push({ ibset, mtrlCno });
+                        costumeMtrls.push({ ibset, mtrlCno });
                       }
                     }
                   }
@@ -820,7 +914,7 @@ export async function loadOfficial3mmMovie(
         keyframes[0] = { x: actrBaseX, y: actrBaseY, z: actrBaseZ, rotY: 0 };
       }
 
-      // Apply optional per-keyframe COLR chunk (for custom & interpolated prop/shape colors)
+      // Apply optional per-keyframe COLR chunk OR multi-frame TDT aetCost color changes
       const colrKid = chunky.findKid(actrMeta, 'COLR');
       const colorByFrame = new Map<number, string>();
       if (colrKid) {
@@ -835,6 +929,36 @@ export async function loadOfficial3mmMovie(
           });
         } catch {
           // ignore malformed COLR
+        }
+      }
+      if (tdtSpec && ggaeMeta) {
+        const gg = parseGG(await chunky.readChunk('GGAE', ggaeMeta.cno));
+        let initialTdtMtrl: number | undefined;
+        let lastTdtMtrl: number | undefined;
+        const sortedAevFrames = Array.from(eventsByFrame.keys()).sort((a, b) => a - b);
+        for (const f of sortedAevFrames) {
+          for (const ev of eventsByFrame.get(f) || []) {
+            if (ev.aet !== 2 || ev.varLength < 28) continue;
+            const fCmtl = gg.dv.getInt32(ev.varOffset + 8, true) !== 0;
+            if (fCmtl) continue;
+            const mCtg = readTagReversed(gg.data, ev.varOffset + 20);
+            const mtrlCno = gg.dv.getUint32(ev.varOffset + 24, true);
+            if (mCtg !== 'MTRL') continue;
+            if (initialTdtMtrl === undefined) {
+              initialTdtMtrl = mtrlCno;
+            }
+            if (mtrlCno !== lastTdtMtrl) {
+              lastTdtMtrl = mtrlCno;
+              const hex = await resolveMtrlHex(mtrlCno, basePalette, chunky);
+              if (hex && (!colorByFrame.has(f))) {
+                colorByFrame.set(f, hex);
+              }
+            }
+          }
+        }
+        if (initialTdtMtrl !== undefined) {
+          // Ensure frame 0 uses initialTdtMtrl cleanly
+          costumeMtrls.splice(0, costumeMtrls.length, { ibset: 0, mtrlCno: initialTdtMtrl });
         }
       }
 
@@ -1023,6 +1147,7 @@ export async function loadOfficial3mmMovie(
       icam,
       cameraAngle: { yaw: 0, pitch: 0 },
       cameraCuts: cameraCuts.length > 0 ? cameraCuts : undefined,
+      transition,
       coordMode: 'world',
       actors,
       props,
