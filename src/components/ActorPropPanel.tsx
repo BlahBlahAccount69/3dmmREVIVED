@@ -128,7 +128,13 @@ const FONT_2D_OPTIONS = [
   'Georgia',
   'Trebuchet MS',
   'Tahoma',
+  'Brush Script MT',
+  'Century Gothic',
 ];
+
+export function isColorablePrimitiveProp(name?: string): boolean {
+  return /^(?:torus|sphere|cube|cylinder|explosio(?:n)?)\b/i.test((name || '').trim());
+}
 
 function wrapDeg(rad: number): number {
   let d = Math.round((rad * 180) / Math.PI) % 360;
@@ -949,21 +955,33 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                 </div>
 
                 {tdtSwatches.length > 0 && (
-                  <div className="flex flex-wrap gap-1 items-center">
-                    <span className="text-[10px] text-purple-200 mr-1">Color:</span>
+                  <div className="flex flex-wrap gap-1 items-center max-h-20 overflow-y-auto pr-0.5">
+                    <span className="text-[10px] text-purple-200 mr-1">Color/Tex:</span>
                     {tdtSwatches.map((sw) => (
                       <button
                         key={sw.mtrlCno}
                         type="button"
                         onClick={() => setNew3dMtrlCno(sw.mtrlCno)}
-                        style={{ backgroundColor: sw.hex }}
-                        className={`w-4 h-4 border ${
+                        style={sw.isTexture ? undefined : { backgroundColor: sw.hex }}
+                        className={`w-4 h-4 border overflow-hidden p-0 ${
                           new3dMtrlCno === sw.mtrlCno
                             ? 'border-2 border-white scale-110'
                             : 'border-black/70'
                         }`}
-                        title={`Material ${sw.mtrlCno}`}
-                      />
+                        title={
+                          sw.isTexture
+                            ? `Texture Material #${sw.mtrlCno}`
+                            : `Color Material #${sw.mtrlCno} (${sw.hex})`
+                        }
+                      >
+                        {sw.isTexture && sw.previewDataUrl ? (
+                          <img
+                            src={sw.previewDataUrl}
+                            alt=""
+                            className="w-full h-full object-cover image-rendering-pixelated"
+                          />
+                        ) : null}
+                      </button>
                     ))}
                   </div>
                 )}
@@ -1223,7 +1241,6 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           )}
 
           {renderRotationControls(selectedActor.id, 'actor')}
-          {renderColorControls(selectedActor.id, 'actor')}
 
           {(() => {
             const actObj = selectedTemplate?.actionCache.get(activeActorAction.anid);
@@ -1402,13 +1419,19 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                             const updated = [...curList];
                             updated[ibset] = cmid;
                             onUpdatePropCostume(selectedProp.id, updated);
-                            onUpdateEntityColor(selectedProp.id, 'prop', swatchHex);
+                            if (isColorablePrimitiveProp(selectedProp.name)) {
+                              onUpdateEntityColor(selectedProp.id, 'prop', swatchHex);
+                            }
                           }}
                           style={{ backgroundColor: swatchHex }}
                           className={`w-4 h-4 border ${
                             isActive ? 'border-2 border-white scale-110' : 'border-black/70'
                           }`}
-                          title={`Costume #${cmid} (${swatchHex}) — interpolates cleanly!`}
+                          title={
+                            isColorablePrimitiveProp(selectedProp.name)
+                              ? `Costume #${cmid} (${swatchHex})`
+                              : `Costume #${cmid}`
+                          }
                         />
                       );
                     })}
@@ -1419,7 +1442,8 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           )}
 
           {renderRotationControls(selectedProp.id, 'prop')}
-          {renderColorControls(selectedProp.id, 'prop')}
+          {isColorablePrimitiveProp(selectedProp.name) &&
+            renderColorControls(selectedProp.id, 'prop')}
 
           {(() => {
             const targetAnid =
@@ -1588,25 +1612,39 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           </div>
 
           {tdtSwatches.length > 0 && (
-            <div className="flex flex-wrap gap-1 items-center">
-              <span className="text-[10px] text-purple-200 mr-1">Material:</span>
-              {tdtSwatches.map((sw) => (
-                <button
-                  key={sw.mtrlCno}
-                  type="button"
-                  onClick={() => {
-                    onUpdateTdtText(selectedTdt.id, { mtrlCno: sw.mtrlCno });
-                    onUpdateEntityColor(selectedTdt.id, 'tdt', sw.hex);
-                  }}
-                  style={{ backgroundColor: sw.hex }}
-                  className={`w-4 h-4 border ${
-                    selectedTdt.mtrlCno === sw.mtrlCno
-                      ? 'border-2 border-white scale-110'
-                      : 'border-black/70'
-                  }`}
-                  title={`Material ${sw.mtrlCno}`}
-                />
-              ))}
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-purple-200">Color &amp; Texture (MTRL):</span>
+              <div className="flex flex-wrap gap-1 items-center max-h-24 overflow-y-auto pr-0.5">
+                {tdtSwatches.map((sw) => (
+                  <button
+                    key={sw.mtrlCno}
+                    type="button"
+                    onClick={() => {
+                      void sound3DMM.playUiWav('COSTUME.WAV');
+                      onUpdateTdtText(selectedTdt.id, { mtrlCno: sw.mtrlCno });
+                    }}
+                    style={sw.isTexture ? undefined : { backgroundColor: sw.hex }}
+                    className={`w-4 h-4 border overflow-hidden p-0 ${
+                      selectedTdt.mtrlCno === sw.mtrlCno
+                        ? 'border-2 border-white scale-110'
+                        : 'border-black/70'
+                    }`}
+                    title={
+                      sw.isTexture
+                        ? `Texture Material #${sw.mtrlCno}`
+                        : `Color Material #${sw.mtrlCno} (${sw.hex})`
+                    }
+                  >
+                    {sw.isTexture && sw.previewDataUrl ? (
+                      <img
+                        src={sw.previewDataUrl}
+                        alt=""
+                        className="w-full h-full object-cover image-rendering-pixelated"
+                      />
+                    ) : null}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 

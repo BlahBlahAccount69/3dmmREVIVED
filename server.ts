@@ -3,11 +3,11 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GoogleGenAI, Schema, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, type Schema } from '@google/genai';
 import {
   buildGeminiMoviePlanSchema,
   buildSystemInstruction,
-  CatalogSummaryPayload,
+  type CatalogSummaryPayload,
   extractRequestedActorCount,
   extractRequestedSceneCount,
   MODEL_FALLBACK_CHAIN,
@@ -38,7 +38,7 @@ function readDotEnvGeminiKey(): string | null {
     if (!fs.existsSync(envPath)) return null;
     const raw = fs.readFileSync(envPath, 'utf8');
     const parsed = dotenv.parse(raw);
-    const val = (parsed.GEMINI_API_KEY || parsed.VITE_GEMINI_API_KEY || '')
+    const val = (parsed.GEMINI_API_KEY || '')
       .replace(/^[“"']+|[”"']+$/g, '')
       .trim();
     return val || null;
@@ -198,7 +198,7 @@ function toSdkThinkingLevel(level?: 'MINIMAL' | 'LOW'): ThinkingLevel | undefine
 }
 
 async function generateWithFallback(prompt: string, catalogSummary: CatalogSummaryPayload) {
-  const primaryKey = process.env.GEMINI_API_KEY?.trim() || process.env.VITE_GEMINI_API_KEY?.trim() || null;
+  const primaryKey = process.env.GEMINI_API_KEY?.trim() || null;
   const dotEnvKey = readDotEnvGeminiKey();
   const candidateKeys: string[] = [];
   if (primaryKey) candidateKeys.push(primaryKey);
@@ -316,30 +316,186 @@ async function generateWithFallback(prompt: string, catalogSummary: CatalogSumma
   throw lastErr || new Error('All Gemini models failed to generate a movie.');
 }
 
+const SAPI4_VOICE_LIMITS: Record<
+  string,
+  { voice: string; minPitch: number; maxPitch: number; defPitch: number; minSpeed: number; maxSpeed: number; defSpeed: number }
+> = {
+  bonzi: {
+    voice: 'Adult Male #2, American English (TruVoice)',
+    minPitch: 50,
+    maxPitch: 400,
+    defPitch: 140,
+    minSpeed: 50,
+    maxSpeed: 250,
+    defSpeed: 157,
+  },
+  sam: {
+    voice: 'Sam',
+    minPitch: 50,
+    maxPitch: 200,
+    defPitch: 100,
+    minSpeed: 30,
+    maxSpeed: 450,
+    defSpeed: 150,
+  },
+  mary: {
+    voice: 'Mary',
+    minPitch: 84,
+    maxPitch: 338,
+    defPitch: 169,
+    minSpeed: 30,
+    maxSpeed: 510,
+    defSpeed: 170,
+  },
+  mike: {
+    voice: 'Mike',
+    minPitch: 84,
+    maxPitch: 338,
+    defPitch: 112,
+    minSpeed: 30,
+    maxSpeed: 510,
+    defSpeed: 170,
+  },
+};
+
+function resolveSapi4Params(rawVoice?: string, rawPitch?: number, rawSpeed?: number) {
+  const clean = (rawVoice || '').trim();
+  const low = clean.toLowerCase();
+
+  let canonical = 'Adult Male #2, American English (TruVoice)';
+  let limits = SAPI4_VOICE_LIMITS.bonzi;
+
+  if (!clean || /bonzi|adult\s*male\s*#?2/i.test(low)) {
+    canonical = 'Adult Male #2, American English (TruVoice)';
+    limits = SAPI4_VOICE_LIMITS.bonzi;
+  } else if (/truvoice|adult\s*(male|female)/i.test(low)) {
+    const femaleMatch = low.match(/adult\s*female\s*#?([12])/i);
+    const maleMatch = low.match(/adult\s*male\s*#?([1-8])/i);
+    if (femaleMatch) {
+      canonical = `Adult Female #${femaleMatch[1]}, American English (TruVoice)`;
+    } else if (maleMatch) {
+      canonical = `Adult Male #${maleMatch[1]}, American English (TruVoice)`;
+    }
+    limits = SAPI4_VOICE_LIMITS.bonzi;
+  } else if (/mary/i.test(low)) {
+    if (/space/i.test(low)) canonical = 'Mary in Space';
+    else if (/hall/i.test(low)) canonical = 'Mary in Hall';
+    else if (/stadium/i.test(low)) canonical = 'Mary in Stadium';
+    else if (/telephone/i.test(low)) canonical = 'Mary (for Telephone)';
+    else canonical = 'Mary';
+    limits = SAPI4_VOICE_LIMITS.mary;
+  } else if (/mike/i.test(low)) {
+    if (/space/i.test(low)) canonical = 'Mike in Space';
+    else if (/hall/i.test(low)) canonical = 'Mike in Hall';
+    else if (/stadium/i.test(low)) canonical = 'Mike in Stadium';
+    else if (/telephone/i.test(low)) canonical = 'Mike (for Telephone)';
+    else canonical = 'Mike';
+    limits = SAPI4_VOICE_LIMITS.mike;
+  } else if (/sam/i.test(low)) {
+    canonical = 'Sam';
+    limits = SAPI4_VOICE_LIMITS.sam;
+  }
+
+  const clampNum = (v: unknown, min: number, max: number, fallback: number) => {
+    const n = typeof v === 'number' ? v : Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.round(Math.max(min, Math.min(max, n)));
+  };
+
+  return {
+    voice: canonical,
+    pitch: clampNum(rawPitch, limits.minPitch, limits.maxPitch, limits.defPitch),
+    speed: clampNum(rawSpeed, limits.minSpeed, limits.maxSpeed, limits.defSpeed),
+  };
+}
+
+const ttsCache = new Map<string, string>();
+
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({
       ok: true,
-      hasGeminiKey: Boolean(
-        process.env.GEMINI_API_KEY?.trim() ||
-          process.env.VITE_GEMINI_API_KEY?.trim() ||
-          readDotEnvGeminiKey()
-      ),
+      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY?.trim() || readDotEnvGeminiKey()),
     });
   });
 
-  app.post('/api/ai/generate-movie', async (req, res) => {
-    if (
-      !process.env.GEMINI_API_KEY?.trim() &&
-      !process.env.VITE_GEMINI_API_KEY?.trim() &&
-      !readDotEnvGeminiKey()
-    ) {
+  app.options(['/api/ai/generate-movie', '/api/ai/generate-movie/'], (_req, res) => {
+    res.setHeader('Allow', 'POST, OPTIONS');
+    res.sendStatus(204);
+  });
+
+  app.post(['/api/tts/sapi4', '/api/tts/sapi4/'], async (req, res) => {
+    const { text, voice, pitch, speed } = (req.body || {}) as {
+      text?: string;
+      voice?: string;
+      pitch?: number;
+      speed?: number;
+    };
+
+    const cleanText = String(text || '').trim().slice(0, 280);
+    if (!cleanText) {
+      res.status(400).json({ error: 'TTS text is required.' });
+      return;
+    }
+
+    const params = resolveSapi4Params(voice, pitch, speed);
+    const cacheKey = `${params.voice}|${params.pitch}|${params.speed}|${cleanText}`;
+    const cached = ttsCache.get(cacheKey);
+    if (cached) {
+      res.json({ audioData: cached, ...params });
+      return;
+    }
+
+    const url =
+      `https://www.tetyys.com/SAPI4/SAPI4?text=${encodeURIComponent(cleanText)}` +
+      `&voice=${encodeURIComponent(params.voice)}` +
+      `&pitch=${params.pitch}&speed=${params.speed}`;
+
+    try {
+      let lastStatus = 500;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        try {
+          const upstream = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              'User-Agent': 'BonziBuddy-TTS/1.0',
+            },
+          });
+          lastStatus = upstream.status;
+          if (upstream.ok) {
+            const buf = Buffer.from(await upstream.arrayBuffer());
+            if (buf.length >= 44 && buf.toString('ascii', 0, 4) === 'RIFF') {
+              const audioData = `data:audio/wav;base64,${buf.toString('base64')}`;
+              if (ttsCache.size > 160) {
+                const firstKey = ttsCache.keys().next().value;
+                if (firstKey) ttsCache.delete(firstKey);
+              }
+              ttsCache.set(cacheKey, audioData);
+              res.json({ audioData, ...params });
+              return;
+            }
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      res.status(502).json({ error: `BonziBuddy SAPI4 TTS returned status ${lastStatus}.` });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'SAPI4 TTS request failed.';
+      res.status(502).json({ error: msg });
+    }
+  });
+
+  app.post(['/api/ai/generate-movie', '/api/ai/generate-movie/'], async (req, res) => {
+    if (!process.env.GEMINI_API_KEY?.trim() && !readDotEnvGeminiKey()) {
       res.status(500).json({
         error:
-          'GEMINI_API_KEY is missing on the server and .env. Add it in Settings > Secrets or .env and try again.',
+          'GEMINI_API_KEY is missing on the server. Add it in Settings > Secrets and try again.',
       });
       return;
     }
@@ -375,6 +531,10 @@ async function startServer() {
         : 500;
       res.status(status).json({ error: message });
     }
+  });
+
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({ error: `Unknown API route: ${req.method} ${req.path}` });
   });
 
   if (!isProduction) {

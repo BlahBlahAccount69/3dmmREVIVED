@@ -9,6 +9,7 @@ import {
 } from './kauaiCodec';
 import {
   applyGlcrPalette,
+  decodeTmapToDataUrl,
   decodeTmapToTexture,
   decodeZbmpToDepthTexture,
   extractSkinHexFromTmap,
@@ -569,6 +570,8 @@ export const TDT_SHAPE_OPTIONS = [
 export interface TdtMaterialSwatch {
   mtrlCno: number;
   hex: string;
+  isTexture?: boolean;
+  previewDataUrl?: string | null;
 }
 
 let tdtMaterialSwatchesPromise: Promise<TdtMaterialSwatch[]> | null = null;
@@ -581,12 +584,27 @@ export function loadTdtMaterialSwatches(): Promise<TdtMaterialSwatch[]> {
       getArchive(assetUrl('3dmm/3dmovie/MTRLS.3CN'), false),
     ]);
     const swatches: TdtMaterialSwatch[] = [];
-    for (const meta of mtrlsCn.getChunksByType('MTRL')) {
-      if (meta.cno < 25344 || meta.cno > 25360) continue;
+    const sortedMtrls = [...mtrlsCn.getChunksByType('MTRL')].sort((a, b) => a.cno - b.cno);
+    for (const meta of sortedMtrls) {
       const parsed = await parseMtrlToThree(mtrlsCn, meta, palette);
       const std = parsed.material as THREE.MeshStandardMaterial;
-      const hex = std.color ? '#' + std.color.getHexString() : '#f59e0b';
-      swatches.push({ mtrlCno: meta.cno, hex });
+      const hex = parsed.skinHex || (std.color ? '#' + std.color.getHexString() : '#f59e0b');
+      if (parsed.tmapCno !== null) {
+        const tmapBytes = await mtrlsCn.readChunk('TMAP', parsed.tmapCno).catch(() => null);
+        const previewDataUrl = tmapBytes ? decodeTmapToDataUrl(tmapBytes, palette) : null;
+        swatches.push({
+          mtrlCno: meta.cno,
+          hex: '#ffffff',
+          isTexture: true,
+          previewDataUrl,
+        });
+      } else {
+        swatches.push({
+          mtrlCno: meta.cno,
+          hex,
+          isTexture: false,
+        });
+      }
     }
     return swatches;
   })().catch(() => {
@@ -1230,10 +1248,27 @@ export function applyGroupColorOverride(group: THREE.Group, colorHex?: string) {
   });
 }
 
+export function isCyclic3dmmAction(actionName: string): boolean {
+  const clean = (actionName || '').trim().toLowerCase();
+  if (!clean) return false;
+  // Terminal one-shot poses that should hold at their final cel once finished
+  if (
+    /^(?:at rest|faint|fall|lie down|get up|kneel|sit,\s*talk,\s*stand|grow|grow fast|shrink|shrink fast|squash|stretch|bang!?|open and close)$/i.test(
+      clean
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function applyActionCelToRig(rig: TemplateRig, action: ParsedAction, frame: number) {
   const len = action.cels.length;
   if (len === 0) return;
-  const icel = Math.max(0, Math.min(len - 1, Math.floor(frame)));
+  const cyclic = len > 1 && isCyclic3dmmAction(action.name);
+  const icel = cyclic
+    ? ((Math.floor(frame) % len) + len) % len
+    : Math.max(0, Math.min(len - 1, Math.floor(frame)));
   const cel = action.cels[icel];
   const { parts, meshes, template, overrideGeometries } = rig;
 
@@ -1276,12 +1311,13 @@ const _sB = new THREE.Vector3();
 /**
  * 24 FPS skeletal / part cel blending between adjacent 6 FPS cels.
  * Smoothly blends position, quaternion (slerp), and scale when body parts match,
- * holding on the final cel once finished (no looping).
+ * looping cyclic/locomotion actions and holding terminal poses on their final cel.
  */
 export function applyActionCelBlendedToRig(rig: TemplateRig, action: ParsedAction, frame: number) {
   const len = action.cels.length;
   if (len === 0) return;
-  if (frame >= len - 1) {
+  const cyclic = len > 1 && isCyclic3dmmAction(action.name);
+  if (!cyclic && frame >= len - 1) {
     applyActionCelToRig(rig, action, len - 1);
     return;
   }
@@ -1293,8 +1329,8 @@ export function applyActionCelBlendedToRig(rig: TemplateRig, action: ParsedActio
     return;
   }
 
-  const icelA = Math.max(0, Math.min(len - 1, baseIdx));
-  const icelB = Math.min(len - 1, icelA + 1);
+  const icelA = cyclic ? ((baseIdx % len) + len) % len : Math.max(0, Math.min(len - 1, baseIdx));
+  const icelB = cyclic ? (icelA + 1) % len : Math.min(len - 1, icelA + 1);
   const celA = action.cels[icelA];
   const celB = action.cels[icelB];
   const { parts, meshes, template, overrideGeometries } = rig;

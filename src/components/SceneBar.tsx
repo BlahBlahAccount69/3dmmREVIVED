@@ -5,12 +5,37 @@ import { sound3DMM } from '../services/soundLibrary';
 import { Plus } from 'lucide-react';
 import { assetUrl } from '../utils/assetUrl';
 
-const TRANSITION_LABELS: Record<SceneTransition, { short: string; label: string }> = {
-  cut: { short: 'Cut', label: 'Cut' },
-  fadeToBlack: { short: 'FadeB', label: 'Fade to Black' },
-  fadeToWhite: { short: 'FadeW', label: 'Fade to White' },
-  dissolve: { short: 'Dis', label: 'Dissolve' },
+const TRANSITION_LABELS: Record<
+  SceneTransition,
+  { short: string; label: string; bmp: string; bmpSel: string }
+> = {
+  cut: {
+    short: 'Cut',
+    label: 'Cut',
+    bmp: '3dmm/bmp/E3TRN1.BMP',
+    bmpSel: '3dmm/bmp/E3TRN1S.BMP',
+  },
+  dissolve: {
+    short: 'Dis',
+    label: 'Dissolve',
+    bmp: '3dmm/bmp/E3TRN2.BMP',
+    bmpSel: '3dmm/bmp/E3TRN2S.BMP',
+  },
+  fadeToBlack: {
+    short: 'FadeB',
+    label: 'Fade to Black',
+    bmp: '3dmm/bmp/E3TRN3.BMP',
+    bmpSel: '3dmm/bmp/E3TRN3S.BMP',
+  },
+  fadeToWhite: {
+    short: 'FadeW',
+    label: 'Fade to White',
+    bmp: '3dmm/bmp/E3TRN4.BMP',
+    bmpSel: '3dmm/bmp/E3TRN4S.BMP',
+  },
 };
+
+const TRANSITION_ORDER: SceneTransition[] = ['cut', 'dissolve', 'fadeToBlack', 'fadeToWhite'];
 
 interface SceneBarProps {
   scenes: Scene[];
@@ -36,6 +61,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
   const currentScene = scenes[currentSceneIndex];
   const hasEntities =
     currentScene && (currentScene.actors.length > 0 || currentScene.props.length > 0);
+  const currentTransition: SceneTransition = currentScene?.transition || 'dissolve';
 
   return (
     <div className="bg-[#2a1453] border-b-2 border-[#120624] px-2.5 py-1 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-100 select-none shrink-0 min-w-0">
@@ -63,8 +89,8 @@ export const SceneBar: React.FC<SceneBarProps> = ({
                 void sound3DMM.playUiWav('DROPDN.WAV');
                 onSelectScene(idx);
               }}
-              title={`Scene ${idx + 1}: ${scene.sceneName} — Transition in: ${tInfo.label}`}
-              className={`px-2.5 py-0.5 text-xs flex items-center gap-1.5 shrink-0 ${
+              title={`Scene ${idx + 1}: ${scene.sceneName} — Transition after scene: ${tInfo.label}`}
+              className={`px-2 py-0.5 text-xs flex items-center gap-1.5 shrink-0 ${
                 isActive
                   ? 'bg-[#6535b8] text-amber-200 font-bold border-2 border-amber-300 shadow'
                   : 'studio-btn text-purple-100'
@@ -73,6 +99,12 @@ export const SceneBar: React.FC<SceneBarProps> = ({
               <span>
                 {idx + 1}. {scene.sceneName}
               </span>
+              <img
+                src={assetUrl(isActive ? tInfo.bmpSel : tInfo.bmp)}
+                alt={tInfo.label}
+                title={`Transition: ${tInfo.label}`}
+                className="h-3.5 w-auto object-contain image-rendering-pixelated"
+              />
               <span className="px-1 bg-black/45 text-[9px] text-cyan-200 font-mono">
                 {tInfo.short}
               </span>
@@ -96,7 +128,7 @@ export const SceneBar: React.FC<SceneBarProps> = ({
         </button>
       </div>
 
-      {/* Quick Scene Setting & Transition Switchers */}
+      {/* Quick Scene Setting & Authentic 3DMM Transition Switchers */}
       {scenes.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2 text-xs text-amber-200 max-w-full min-w-0">
           <div className="flex items-center gap-1.5 max-w-full min-w-0">
@@ -125,23 +157,47 @@ export const SceneBar: React.FC<SceneBarProps> = ({
             </select>
           </div>
           {onUpdateSceneTransition && (
-            <div className="flex items-center gap-1.5 max-w-full min-w-0">
+            <div
+              className="flex items-center gap-1 max-w-full min-w-0"
+              title="Transition after this scene into the next scene"
+            >
+              <img
+                src={assetUrl('3dmm/bmp/2TRAN.BMP')}
+                alt="Transition"
+                className="h-4 w-auto object-contain image-rendering-pixelated shrink-0"
+              />
               <span className="font-bold shrink-0 text-cyan-200">Transition:</span>
-              <select
-                aria-label="Scene Transition"
-                title="Transition when entering this scene"
-                value={currentScene?.transition || 'dissolve'}
-                onChange={(e) => {
-                  void sound3DMM.playUiWav('DROPDN.WAV');
-                  onUpdateSceneTransition(e.target.value as SceneTransition);
-                }}
-                className="studio-well px-2 py-0.5 text-xs text-cyan-100 focus:outline-none cursor-pointer"
-              >
-                <option value="dissolve">Dissolve</option>
-                <option value="cut">Cut</option>
-                <option value="fadeToBlack">Fade to Black</option>
-                <option value="fadeToWhite">Fade to White</option>
-              </select>
+              <div className="flex items-center gap-0.5 studio-well p-0.5">
+                {TRANSITION_ORDER.map((tMode) => {
+                  const meta = TRANSITION_LABELS[tMode];
+                  const active = currentTransition === tMode;
+                  return (
+                    <button
+                      key={tMode}
+                      type="button"
+                      onClick={() => {
+                        void sound3DMM.playUiWav('DROPDN.WAV');
+                        onUpdateSceneTransition(tMode);
+                      }}
+                      title={meta.label}
+                      aria-label={meta.label}
+                      aria-pressed={active}
+                      className={`px-1 py-0.5 flex items-center gap-1 text-[10px] ${
+                        active
+                          ? 'bg-[#6535b8] text-amber-200 font-bold border border-amber-300'
+                          : 'text-purple-200 hover:bg-purple-800/60 border border-transparent'
+                      }`}
+                    >
+                      <img
+                        src={assetUrl(active ? meta.bmpSel : meta.bmp)}
+                        alt={meta.label}
+                        className="h-3.5 w-auto object-contain image-rendering-pixelated"
+                      />
+                      <span className="hidden xl:inline">{meta.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

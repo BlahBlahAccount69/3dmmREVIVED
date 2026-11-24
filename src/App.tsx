@@ -38,7 +38,7 @@ import {
 } from './components/Viewport3D';
 import { SceneBar } from './components/SceneBar';
 import { CameraAngleBar } from './components/CameraAngleBar';
-import { ActorPropPanel } from './components/ActorPropPanel';
+import { ActorPropPanel, isColorablePrimitiveProp } from './components/ActorPropPanel';
 import { TimelineBar } from './components/TimelineBar';
 import { AudioImportModal } from './components/AudioImportModal';
 import { assetUrl } from './utils/assetUrl';
@@ -81,7 +81,7 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stageViewRef = useRef<LoadedBackgroundView | null>(null);
-  const stageCaptureRef = useRef<(() => string | null) | null>(null);
+  const stageCaptureRef = useRef<(() => ImageData | null) | null>(null);
   const [transitionOverlay, setTransitionOverlay] = useState<TransitionOverlayState | null>(null);
   const activeTransitionRef = useRef<{
     kind: SceneTransition;
@@ -89,7 +89,7 @@ export default function App() {
     elapsed: number;
     duration: number;
     targetSceneIndex: number;
-    snapshotDataUrl?: string | null;
+    snapshotImageData?: ImageData | null;
   } | null>(null);
 
   const clearTransition = () => {
@@ -161,6 +161,9 @@ export default function App() {
     if (!scene) return;
     const cues = scene.audios.filter((a) => a.frame === frame);
     for (const cue of cues) {
+      if (cue.waitForFinish && cue.audioData && !cue.loop) {
+        sound3DMM.markPendingVoice(cue.id);
+      }
       void sound3DMM.playCue(cue);
     }
   };
@@ -178,13 +181,13 @@ export default function App() {
 
       const scenes = movieRef.current.scenes;
       if (scenes && scenes.length > 0) {
-        // Handle active transition overlay (Fade to Black / Fade to White / Dissolve)
+        // Handle active 3DMM pixel-dissolve transition (Fade to Black / Fade to White / Dissolve)
         const tr = activeTransitionRef.current;
         if (tr) {
           tr.elapsed += dt;
           if (tr.phase === 'out') {
             const p = Math.min(1, tr.elapsed / Math.max(0.05, tr.duration));
-            setTransitionOverlay({ mode: tr.kind, opacity: p });
+            setTransitionOverlay({ mode: tr.kind, phase: 'out', progress: p });
             if (tr.elapsed >= tr.duration) {
               const nextSceneIdx = tr.targetSceneIndex;
               sound3DMM.stopLoopingSfx();
@@ -213,21 +216,22 @@ export default function App() {
               triggerAudiosForFrame(nextSceneObj, 0);
               tr.phase = 'in';
               tr.elapsed = 0;
-              tr.duration = 0.35;
-              setTransitionOverlay({ mode: tr.kind, opacity: 1 });
+              tr.duration = 0.72;
+              setTransitionOverlay({ mode: tr.kind, phase: 'in', progress: 0 });
             }
             rafId = window.requestAnimationFrame(step);
             return;
           } else {
-            const p = Math.max(0, 1 - tr.elapsed / Math.max(0.05, tr.duration));
-            if (p <= 0.005) {
+            const p = Math.min(1, tr.elapsed / Math.max(0.05, tr.duration));
+            if (p >= 0.996) {
               activeTransitionRef.current = null;
               setTransitionOverlay(null);
             } else {
               setTransitionOverlay({
                 mode: tr.kind,
-                opacity: p,
-                snapshotDataUrl: tr.snapshotDataUrl,
+                phase: 'in',
+                progress: p,
+                snapshotImageData: tr.snapshotImageData,
               });
             }
           }
@@ -265,21 +269,33 @@ export default function App() {
         playheadRef.current.scrollHoldActive = false;
         playheadRef.current.scrollElapsedSec = 0;
 
+        // Wait for any active blocking voice cue (waitForFinish) to finish before advancing
+        if (sound3DMM.isWaitingForVoice()) {
+          playheadRef.current.frame = intFrame;
+          playheadRef.current.renderFrame = intFrame;
+          rafId = window.requestAnimationFrame(step);
+          return;
+        }
+
         let nextRender = subFrame + dt * 6.0;
         let nextIntFrame = Math.floor(nextRender + 1e-6);
         let nextSceneIndex = sceneIndex;
 
-        // If crossing into a frame that introduces an uncompleted scrolling credits box,
-        // land cleanly on that frame so scrolling credits render and freeze that frame until finished.
+        // Land cleanly on any frame introducing scrolling credits OR a waitForFinish voice cue
         if (nextIntFrame > intFrame) {
           const maxCheck = Math.min(nextIntFrame, activeScene.totalFrames);
           for (let fCheck = intFrame + 1; fCheck <= maxCheck; fCheck++) {
-            const incoming = activeScrollingAtFrame(activeScene, fCheck);
-            if (incoming.length > 0) {
+            const incomingScroll = activeScrollingAtFrame(activeScene, fCheck);
+            const incomingVoice = (activeScene.audios || []).some(
+              (a) => a.frame === fCheck && a.waitForFinish && Boolean(a.audioData) && !a.loop
+            );
+            if (incomingScroll.length > 0 || incomingVoice) {
               nextIntFrame = fCheck;
               nextRender = fCheck;
-              playheadRef.current.scrollHoldActive = true;
-              playheadRef.current.scrollElapsedSec = 0;
+              if (incomingScroll.length > 0) {
+                playheadRef.current.scrollHoldActive = true;
+                playheadRef.current.scrollElapsedSec = 0;
+              }
               break;
             }
           }
@@ -288,7 +304,8 @@ export default function App() {
         if (nextIntFrame > activeScene.totalFrames) {
           if (sceneIndex + 1 < scenes.length) {
             const candidateNext = sceneIndex + 1;
-            const transKind: SceneTransition = scenes[candidateNext]?.transition || 'dissolve';
+            // Per Microsoft 3DMM MOVIE.CPP:4599 (_trans = Pscen()->Trans()), SCEN.trans is the outgoing transition after the finishing scene
+            const transKind: SceneTransition = activeScene?.transition || 'dissolve';
 
             if (transKind === 'fadeToBlack' || transKind === 'fadeToWhite') {
               playheadRef.current.frame = activeScene.totalFrames;
@@ -297,10 +314,10 @@ export default function App() {
                 kind: transKind,
                 phase: 'out',
                 elapsed: 0,
-                duration: 0.32,
+                duration: 0.72,
                 targetSceneIndex: candidateNext,
               };
-              setTransitionOverlay({ mode: transKind, opacity: 0.02 });
+              setTransitionOverlay({ mode: transKind, phase: 'out', progress: 0 });
               rafId = window.requestAnimationFrame(step);
               return;
             }
@@ -311,14 +328,15 @@ export default function App() {
                 kind: 'dissolve',
                 phase: 'in',
                 elapsed: 0,
-                duration: 0.55,
+                duration: 1.35,
                 targetSceneIndex: candidateNext,
-                snapshotDataUrl: snap,
+                snapshotImageData: snap,
               };
               setTransitionOverlay({
                 mode: 'dissolve',
-                opacity: 1,
-                snapshotDataUrl: snap,
+                phase: 'in',
+                progress: 0,
+                snapshotImageData: snap,
               });
             }
 
@@ -811,9 +829,18 @@ export default function App() {
     const updated = [...movie.scenes];
     updated[currentSceneIndex] = {
       ...currentScene,
-      tdtTexts: (currentScene.tdtTexts || []).map((t) =>
-        t.id === id ? { ...t, ...patch } : t
-      ),
+      tdtTexts: (currentScene.tdtTexts || []).map((t) => {
+        if (t.id !== id) return t;
+        if (patch.mtrlCno !== undefined) {
+          const cleanedKfs: Record<number, KeyframePosition> = {};
+          for (const [kfStr, kfVal] of Object.entries(t.keyframes)) {
+            const { color: _drop, ...rest } = kfVal;
+            cleanedKfs[Number(kfStr)] = rest;
+          }
+          return { ...t, ...patch, keyframes: cleanedKfs };
+        }
+        return { ...t, ...patch };
+      }),
     };
     setMovie({ ...movie, scenes: updated });
   };
@@ -1172,6 +1199,11 @@ export default function App() {
     color?: string
   ) => {
     if (!currentScene) return;
+    if (type === 'actor') return;
+    if (type === 'prop') {
+      const targetProp = currentScene.props.find((p) => p.id === id);
+      if (!targetProp || !isColorablePrimitiveProp(targetProp.name)) return;
+    }
     const updated = [...movie.scenes];
     const patchColor = (kfs: Record<number, KeyframePosition>) => {
       const cur = resolveInterpolatedKeyframe(kfs, currentFrame, undefined, enableInterpolation);

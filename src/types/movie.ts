@@ -128,6 +128,10 @@ export interface ImportedAudioCue {
   isMidi?: boolean;
   isCustomAudio?: boolean;
   loop?: boolean;
+  waitForFinish?: boolean;
+  ttsVoice?: string;
+  ttsPitch?: number;
+  ttsSpeed?: number;
   msndCno?: number;
   isStopper?: boolean;
   playlist?: {

@@ -25,15 +25,8 @@ import {
   TDT_SHAPE_OPTIONS,
   ThreeDmmCatalog,
 } from './threeDmmEngine';
-import { CatalogSoundItem, sound3DMM } from './soundLibrary';
-import {
-  buildGeminiMoviePlanSchema,
-  buildSystemInstruction,
-  CatalogSummaryPayload,
-  extractRequestedActorCount,
-  extractRequestedSceneCount,
-  MODEL_FALLBACK_CHAIN,
-} from './aiTrainingContext';
+import { CatalogSoundItem, sound3DMM, synthesizeSapi4Tts } from './soundLibrary';
+import { CatalogSummaryPayload } from './aiTrainingContext';
 
 interface AiKeyframePlan {
   frame: number;
@@ -106,6 +99,8 @@ interface AiMoviePlan {
       text: string;
       fontName?: string;
       fontSize?: number;
+      bold?: boolean;
+      italic?: boolean;
       startFrame: number;
       endFrame: number;
       placement?: string;
@@ -117,6 +112,15 @@ interface AiMoviePlan {
       frame: number;
       soundName: string;
       loop?: boolean;
+    }[];
+    ttsVoices?: {
+      frame: number;
+      speaker?: string;
+      text: string;
+      voice?: string;
+      pitch?: number;
+      speed?: number;
+      waitForFinish?: boolean;
     }[];
   }[];
 }
@@ -161,15 +165,21 @@ const COMMON_PROP_ACTIONS = [
 
 const FONT_2D_LIST = [
   'Comic Sans MS',
+  'Arial',
   'Futura',
-  'Impact',
   'Times New Roman',
   'Courier New',
-  'Arial',
+  'Impact',
+  'Verdana',
+  'Georgia',
+  'Trebuchet MS',
+  'Tahoma',
+  'Brush Script MT',
+  'Century Gothic',
 ];
 
 const SIGNATURE_SOUND_PATTERNS = [
-  /funny moment|happy end|triumph|danger|scare|tension|specter|quest|mystery|geist|bistro|villain|\.mid/i,
+  /funny moment|happy end|triumph|danger|scare|tension|specter|quest|mystery|geist|bistro|villain/i,
   /explosion|rocket launch|owl hoot|thunder|siren|chuckle|laugh|crash|scream|applause|footstep|static/i,
   /surprise|oh no|hey|watch out|hurry|all right|yipee|worked|follow me|stop!|get him|creation|doggy|mega/i,
 ];
@@ -183,6 +193,10 @@ function validHex(hex?: string): string | undefined {
   if (!hex || typeof hex !== 'string') return undefined;
   const trimmed = hex.trim();
   return /^#[0-9a-f]{6}$/i.test(trimmed) ? trimmed.toLowerCase() : undefined;
+}
+
+function isColorablePrimitiveProp(name?: string): boolean {
+  return /^(?:torus|sphere|cube|cylinder|explosio(?:n)?)\b/i.test((name || '').trim());
 }
 
 function normalizeTransition(raw?: string): SceneTransition | undefined {
@@ -286,29 +300,43 @@ export function buildEntityKeyframes(
   fallbackZ: number,
   opts: {
     colorHex?: string;
+    allowColor?: boolean;
     startFrame?: number;
     endFrame?: number;
     isActor?: boolean;
     entityName?: string;
     allowSlowUser?: boolean;
     actionMap?: Record<number, { actionName?: string; action?: string }>;
-    onFinishEarlyMove?: (arrivalFrame: number) => void;
+    onRemapFrames?: (remap: Array<{ origF: number; newF: number }>) => void;
+    onEnsureMoveLocomotion?: (
+      f0: number,
+      f1: number,
+      speed: number,
+      dx: number,
+      dy: number,
+      dz: number,
+      yStart: number,
+      yEnd: number,
+      rotYStart: number
+    ) => void;
+    onEnsureStopRest?: (stopFrame: number, nextMoveFrame: number | null, yPos: number) => void;
   }
 ): Record<number, KeyframePosition> {
-  const defaultColor = validHex(opts.colorHex);
+  const allowColor = opts.allowColor !== false;
+  const defaultColor = allowColor ? validHex(opts.colorHex) : undefined;
   const parsedKfs: Record<number, KeyframePosition> = {};
 
   if (Array.isArray(rawKfs)) {
     for (const kf of rawKfs) {
       const f = Math.round(clamp(kf.frame, 0, totalFrames));
-      const baseScale = kf.scale !== undefined ? clamp(kf.scale, 0.1, 8.0) : 1;
-      const sx = kf.scaleX !== undefined ? clamp(kf.scaleX, 0.1, 8.0) : baseScale;
-      const sy = kf.scaleY !== undefined ? clamp(kf.scaleY, 0.1, 8.0) : baseScale;
-      const sz = kf.scaleZ !== undefined ? clamp(kf.scaleZ, 0.1, 8.0) : baseScale;
+      const baseScale = kf.scale !== undefined ? clamp(kf.scale, 0.04, 10.0) : 1;
+      const sx = kf.scaleX !== undefined ? clamp(kf.scaleX, 0.04, 10.0) : baseScale;
+      const sy = kf.scaleY !== undefined ? clamp(kf.scaleY, 0.04, 10.0) : baseScale;
+      const sz = kf.scaleZ !== undefined ? clamp(kf.scaleZ, 0.04, 10.0) : baseScale;
       const entry: KeyframePosition = {
-        x: clamp(kf.x, -22, 22),
-        y: clamp(kf.y, -3, 18),
-        z: clamp(kf.z, -22, 22),
+        x: clamp(kf.x, -30, 30),
+        y: clamp(kf.y, -5, 22),
+        z: clamp(kf.z, -30, 30),
         rotY: Number.isFinite(kf.rotY) ? kf.rotY : 0,
       };
       if (kf.rotX !== undefined && Math.abs(kf.rotX) > 0.01 && Number.isFinite(kf.rotX)) {
@@ -325,9 +353,11 @@ export function buildEntityKeyframes(
       if (kf.visible !== undefined) {
         entry.visible = Boolean(kf.visible);
       }
-      const kfColor = validHex(kf.colorHex) || defaultColor;
-      if (kfColor) {
-        entry.color = kfColor;
+      if (allowColor) {
+        const kfColor = validHex(kf.colorHex) || defaultColor;
+        if (kfColor) {
+          entry.color = kfColor;
+        }
       }
       parsedKfs[f] = entry;
     }
@@ -412,6 +442,10 @@ export function buildEntityKeyframes(
       remapped.push({ origF: f1, newF: nextF, pos: p1, compressed });
     }
 
+    if (anyCompressed && opts.onRemapFrames) {
+      opts.onRemapFrames(remapped.map((r) => ({ origF: r.origF, newF: r.newF })));
+    }
+
     // If a slow single bounce/oscillation (e.g. f=0 -> f=30 -> f=60 returning near start) got compressed,
     // repeat the snappy compressed cycle up to the original end frame so the object keeps moving!
     const first = remapped[0];
@@ -442,32 +476,62 @@ export function buildEntityKeyframes(
     for (const r of remapped) {
       kfs[r.newF] = r.pos;
     }
-
-    // If a compressed walking/running move finished well before scene end and has no later actions,
-    // notify caller so actor cleanly switches to At Rest upon arrival instead of running in place.
-    if (
-      anyCompressed &&
-      opts.isActor &&
-      opts.onFinishEarlyMove &&
-      last.compressed &&
-      last.newF < totalFrames - 2
-    ) {
-      opts.onFinishEarlyMove(last.newF);
-    }
   } else {
     Object.assign(kfs, parsedKfs);
   }
 
+  const anchorFrames = Object.keys(kfs).map(Number).sort((a, b) => a - b);
+
+  // Align actor locomotion & stop transitions strictly with movement segments [f0, f1)
+  if (opts.isActor && anchorFrames.length > 0) {
+    const segMoves: boolean[] = [];
+    for (let i = 0; i < anchorFrames.length - 1; i++) {
+      const f0 = anchorFrames[i];
+      const f1 = anchorFrames[i + 1];
+      const p0 = kfs[f0];
+      const p1 = kfs[f1];
+      const span = f1 - f0;
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      const dz = p1.z - p0.z;
+      const dist = Math.hypot(dx, dy, dz);
+      const moved = span >= 1 && p0.visible !== false && p1.visible !== false && dist > 0.35;
+      segMoves.push(moved);
+      if (moved && opts.onEnsureMoveLocomotion) {
+        opts.onEnsureMoveLocomotion(f0, f1, dist / span, dx, dy, dz, p0.y, p1.y, p0.rotY);
+      }
+    }
+
+    // Whenever an actor stops after a moving segment (either entering a stationary segment or halting before scene end),
+    // guarantee the action switches cleanly to At Rest (or preserves explicit Talk/Laugh/Sit/etc.) at that exact stop frame!
+    if (opts.onEnsureStopRest) {
+      for (let i = 1; i < anchorFrames.length; i++) {
+        const prevMoved = segMoves[i - 1];
+        const curMoved = i < segMoves.length ? segMoves[i] : false;
+        const stopF = anchorFrames[i];
+        if (prevMoved && !curMoved && (i < segMoves.length || stopF < totalFrames)) {
+          let nextMoveF: number | null = null;
+          for (let j = i + 1; j < segMoves.length; j++) {
+            if (segMoves[j]) {
+              nextMoveF = anchorFrames[j];
+              break;
+            }
+          }
+          opts.onEnsureStopRest(stopF, nextMoveF, kfs[stopF].y);
+        }
+      }
+    }
+  }
+
   // Densify EVERY frame (step = 1) along moving segments so both discrete 6 FPS playback
   // (default enableInterpolation = false) and 60 FPS interpolation animate fluidly with zero stalling!
-  const anchorFrames = Object.keys(kfs).map(Number).sort((a, b) => a - b);
   const densified: Record<number, KeyframePosition> = { ...kfs };
 
   for (let i = 0; i < anchorFrames.length - 1; i++) {
     const f0 = anchorFrames[i];
     const f1 = anchorFrames[i + 1];
-    const p0 = kfs[f0];
-    const p1 = kfs[f1];
+    const p0 = densified[f0] || kfs[f0];
+    const p1 = densified[f1] || kfs[f1];
     const span = f1 - f0;
     if (span < 2 || p0.visible === false || p1.visible === false) continue;
 
@@ -477,10 +541,30 @@ export function buildEntityKeyframes(
     const horizDist = Math.hypot(dx, dz);
     const activeAct = opts.actionMap ? resolveActionNameAtFrame(opts.actionMap, f0) : '';
     const isJumping = opts.isActor && /jump|hop/i.test(activeAct);
+    const isBackwards = opts.isActor && /walk backwards/i.test(activeAct);
+    const isLocomotion = /walk|run|sneak|crawl|fly/i.test(activeAct);
     const isMoving = horizDist > 0.25 || Math.abs(dy) > 0.25 || isJumping;
     if (!isMoving) continue;
 
-    const travelYaw = horizDist > 0.25 ? Math.atan2(dx, dz) : p0.rotY;
+    const travelYaw =
+      horizDist > 0.25 ? (isBackwards ? Math.atan2(-dx, -dz) : Math.atan2(dx, dz)) : p0.rotY;
+
+    // Aim depart keyframe f0 in the travel direction so actor walks where they go from frame 1 of the move
+    if (opts.isActor && isLocomotion && horizDist > 0.25) {
+      densified[f0] = { ...p0, rotY: Number(travelYaw.toFixed(3)) };
+    }
+
+    // Avoid sudden snap back to facing camera (0) right at arrival unless transitioning into a later directional move
+    if (
+      opts.isActor &&
+      isLocomotion &&
+      horizDist > 0.25 &&
+      Math.abs(travelYaw) > 0.45 &&
+      Math.abs(p1.rotY) < 0.05
+    ) {
+      densified[f1] = { ...p1, rotY: Number(travelYaw.toFixed(3)) };
+    }
+
     for (let f = f0 + 1; f < f1; f++) {
       if (densified[f]) continue;
       const t = (f - f0) / span;
@@ -490,7 +574,7 @@ export function buildEntityKeyframes(
         y: Number((p0.y + dy * t + arcY).toFixed(3)),
         z: Number((p0.z + dz * t).toFixed(3)),
         rotY:
-          horizDist > 0.25 && /walk|run|sneak|crawl|fly/i.test(activeAct)
+          horizDist > 0.25 && isLocomotion
             ? Number(travelYaw.toFixed(3))
             : Number(lerpAngle(p0.rotY, p1.rotY, t).toFixed(3)),
       };
@@ -508,7 +592,7 @@ export function buildEntityKeyframes(
         entry.scaleY = Number(sy.toFixed(3));
         entry.scaleZ = Number(sz.toFixed(3));
       }
-      if (p0.color) entry.color = p0.color;
+      if (allowColor && p0.color) entry.color = p0.color;
       densified[f] = entry;
     }
   }
@@ -569,208 +653,39 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
   ];
 }
 
-function extractGeminiCandidateText(json: {
-  candidates?: { content?: { parts?: { text?: string }[] } }[];
-}): string {
-  const parts = json?.candidates?.[0]?.content?.parts || [];
-  return parts
-    .map((p) => p.text || '')
-    .join('')
-    .trim();
-}
-
-async function generatePlanDirectlyWithGemini(
-  apiKey: string,
-  prompt: string,
-  catalogSummary: CatalogSummaryPayload
-): Promise<AiMoviePlan> {
-  const trimmedPrompt = (prompt || '').trim();
-  const requestedSceneCount = extractRequestedSceneCount(trimmedPrompt);
-  const requestedActorCount = extractRequestedActorCount(trimmedPrompt);
-  const schema = buildGeminiMoviePlanSchema(requestedSceneCount);
-  const systemInstruction = buildSystemInstruction({
-    prompt: trimmedPrompt,
-    requestedSceneCount,
-    requestedActorCount,
-  });
-
-  const userMessage = JSON.stringify({
-    storyIdea:
-      trimmedPrompt.length > 0
-        ? trimmedPrompt
-        : 'Create a hilarious, imaginative 6-scene 3D Movie Maker adventure with varied scene lengths, transitions (cut/dissolve/fadeToBlack/fadeToWhite), multi-actor cast in varied costumes, stretched/colored props, dynamic camera cuts, 3D word, 2D dialogue/credits, and synced MIDI/custom .3MM voices/SFX.',
-    ...(requestedSceneCount !== null ? { requestedSceneCount } : { targetSceneRange: '5-8' }),
-    ...(requestedActorCount !== null ? { requestedActorCount } : {}),
-    catalogSummary,
-  });
-
-  const callModel = async (
-    model: string,
-    contentsText: string,
-    sysText: string,
-    resSchema: unknown,
-    thinkingLevel?: 'MINIMAL' | 'LOW'
-  ): Promise<AiMoviePlan> => {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-      model
-    )}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: sysText }] },
-        contents: [{ role: 'user', parts: [{ text: contentsText }] }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: resSchema,
-          ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
-        },
-      }),
-    });
-
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const msg =
-        (data as { error?: { message?: string } })?.error?.message ||
-        `Gemini API error (${resp.status})`;
-      throw new Error(msg);
-    }
-
-    const text = extractGeminiCandidateText(data);
-    if (!text) {
-      throw new Error(`Gemini (${model}) returned an empty response.`);
-    }
-    const parsed = JSON.parse(text) as AiMoviePlan;
-    if (!parsed || !Array.isArray(parsed.scenes) || parsed.scenes.length === 0) {
-      throw new Error(`Gemini (${model}) returned a plan with no scenes.`);
-    }
-    return parsed;
-  };
-
-  let lastErr: unknown;
-  for (const entry of MODEL_FALLBACK_CHAIN) {
-    try {
-      const parsed = await callModel(
-        entry.model,
-        userMessage,
-        systemInstruction,
-        schema,
-        entry.thinkingLevel
-      );
-
-      const minimumDesiredScenes = requestedSceneCount ?? 5;
-      let rounds = 0;
-      while (parsed.scenes.length < minimumDesiredScenes && rounds < 2) {
-        rounds++;
-        const missing = minimumDesiredScenes - parsed.scenes.length;
-        try {
-          const extSchema = buildGeminiMoviePlanSchema(missing);
-          const extPrompt = JSON.stringify({
-            storyIdea:
-              trimmedPrompt ||
-              'Continue this 3DMM movie adventure seamlessly to a climactic finale and credits.',
-            existingTitle: parsed.title,
-            existingPlot: parsed.plot,
-            existingSceneNames: parsed.scenes.map((s) => s.sceneName),
-            instruction: `Continue this exact story seamlessly and generate AT LEAST ${missing} additional distinct scenes so total scenes reaches ${minimumDesiredScenes}. Do NOT repeat existing scenes.`,
-            catalogSummary,
-          });
-          const extParsed = await callModel(
-            entry.model,
-            extPrompt,
-            buildSystemInstruction({
-              prompt: trimmedPrompt,
-              requestedSceneCount: missing,
-              requestedActorCount,
-            }),
-            extSchema,
-            entry.thinkingLevel
-          );
-          if (Array.isArray(extParsed.scenes) && extParsed.scenes.length > 0) {
-            parsed.scenes = [...parsed.scenes, ...extParsed.scenes.slice(0, missing)];
-          } else {
-            break;
-          }
-        } catch {
-          break;
-        }
-      }
-
-      return parsed;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-
-  throw lastErr instanceof Error ? lastErr : new Error('All Gemini models failed to generate a movie.');
-}
-
 async function requestAiMoviePlan(
   prompt: string,
   catalogSummary: CatalogSummaryPayload
 ): Promise<AiMoviePlan> {
-  const clientApiKey = (
-    (import.meta as unknown as { env?: Record<string, string | undefined> }).env
-      ?.VITE_GEMINI_API_KEY || ''
-  ).trim();
+  const res = await fetch('/api/ai/generate-movie', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, catalogSummary }),
+  });
 
-  let serverFailureMessage: string | null = null;
-  let canFallbackToClient = false;
+  const contentType = res.headers.get('content-type') || '';
+  const isJson = /application\/json/i.test(contentType);
+  const payload = isJson
+    ? ((await res.json().catch(() => ({}))) as {
+        moviePlan?: AiMoviePlan;
+        error?: string;
+      })
+    : {};
 
-  try {
-    const res = await fetch('/api/ai/generate-movie', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, catalogSummary }),
-    });
-
-    const contentType = res.headers.get('content-type') || '';
-    const isJson = /application\/json/i.test(contentType);
-    const payload = isJson
-      ? ((await res.json().catch(() => ({}))) as {
-          moviePlan?: AiMoviePlan;
-          error?: string;
-        })
-      : {};
-
-    if (res.ok && payload.moviePlan) {
-      return payload.moviePlan;
-    }
-
-    if (
-      !isJson ||
-      res.status === 404 ||
-      res.status === 405 ||
-      res.status === 501 ||
-      res.status >= 500
-    ) {
-      canFallbackToClient = true;
-      serverFailureMessage =
-        payload.error || `AI Movie endpoint returned ${res.status}.`;
-    } else {
-      throw new Error(payload.error || `AI Movie Generator request failed (${res.status}).`);
-    }
-  } catch (err) {
-    // Network / CORS / missing backend route on static hosting -> direct Gemini REST fallback
-    canFallbackToClient = true;
-    if (err instanceof Error && err.message && !/fetch|network|json|abort/i.test(err.message)) {
-      throw err;
-    }
+  if (res.ok && payload.moviePlan) {
+    return payload.moviePlan;
   }
 
-  if (canFallbackToClient && clientApiKey) {
-    return generatePlanDirectlyWithGemini(clientApiKey, prompt, catalogSummary);
-  }
-
-  if (!clientApiKey) {
+  if (res.status === 405) {
     throw new Error(
-      serverFailureMessage ||
-        'Gemini API key is not configured for this deployment. Set VITE_GEMINI_API_KEY in build secrets or GEMINI_API_KEY on the host environment.'
+      'AI Movie Generator endpoint returned HTTP 405 (Method Not Allowed). Start the app with its Node/Express server (`npm run dev` or `npm start`) rather than static-only hosting.'
     );
   }
 
-  throw new Error(serverFailureMessage || 'AI Movie Generator failed.');
+  throw new Error(
+    payload.error ||
+      `AI Movie Generator server request failed (${res.status}). Ensure GEMINI_API_KEY is configured in Settings > Secrets.`
+  );
 }
 
 export async function generateAiMovie(options: {
@@ -814,7 +729,7 @@ export async function generateAiMovie(options: {
   const plan = await requestAiMoviePlan(prompt, catalogSummary);
   const rawScenes = plan.scenes || [];
 
-  // Parallel pre-hydration of TDT swatches, unique TMPLS.3CN templates, and all matched sounds (SNDS, .3MM custom, Studio .MID)
+  // Parallel pre-hydration of TDT swatches, unique TMPLS.3CN templates, and all matched sounds (SNDS, .3MM custom)
   const matchedActorsMap = new Map<string, CatalogActorItem>();
   const matchedPropsMap = new Map<string, CatalogPropItem>();
   const neededTmpls = new Set<number>();
@@ -854,8 +769,58 @@ export async function generateAiMovie(options: {
     { audioData: string; midiData?: string; isMidi: boolean; isCustomAudio?: boolean }
   >();
 
+  const ttsTasks: Array<{
+    key: string;
+    text: string;
+    voice: string;
+    pitch?: number;
+    speed?: number;
+  }> = [];
+  const seenTtsKeys = new Set<string>();
+  for (let sIdx = 0; sIdx < rawScenes.length; sIdx++) {
+    const sp = rawScenes[sIdx];
+    for (let vIdx = 0; vIdx < (sp.ttsVoices || []).length; vIdx++) {
+      const vp = sp.ttsVoices![vIdx];
+      const text = (vp.text || '').trim().slice(0, 220);
+      if (!text) continue;
+      const voice = (vp.voice || 'Adult Male #2, American English (TruVoice)').trim();
+      const key = `${voice}|${vp.pitch ?? ''}|${vp.speed ?? ''}|${text}`;
+      if (seenTtsKeys.has(key)) continue;
+      seenTtsKeys.add(key);
+      ttsTasks.push({ key, text, voice, pitch: vp.pitch, speed: vp.speed });
+    }
+  }
+
+  const ttsResultMap = new Map<
+    string,
+    { audioData: string; voice: string; pitch: number; speed: number }
+  >();
+
+  const runTtsBatch = async () => {
+    const queue = [...ttsTasks];
+    const workers = Array.from({ length: Math.min(4, Math.max(1, queue.length)) }, async () => {
+      while (queue.length > 0) {
+        const task = queue.shift();
+        if (!task) break;
+        try {
+          const res = await synthesizeSapi4Tts({
+            text: task.text,
+            voice: task.voice,
+            pitch: task.pitch,
+            speed: task.speed,
+          });
+          ttsResultMap.set(task.key, res);
+        } catch (err) {
+          console.warn('SAPI4 TTS synthesis failed for line:', task.text, err);
+        }
+      }
+    });
+    await Promise.all(workers);
+  };
+
   const [swatches] = await Promise.all([
     loadTdtMaterialSwatches().catch(() => []),
+    runTtsBatch(),
     ...Array.from(neededTmpls).map(async (tmplCno) => {
       try {
         const tmpl = await loadTemplate(tmplCno);
@@ -873,6 +838,9 @@ export async function generateAiMovie(options: {
       }
     }),
   ]);
+
+  const solidTdtSwatches = swatches.filter((s) => !s.isTexture);
+  const tdtPaletteSwatches = solidTdtSwatches.length > 0 ? solidTdtSwatches : swatches;
 
   const allowSlowUser =
     /\b(slow|slowly|snail|turtle|sloth|creep|tiptoe|gentle|gently|gradual|drift)\b/i.test(
@@ -924,25 +892,99 @@ export async function generateAiMovie(options: {
 
       const defaultSlotX = (aIdx - ((sp.actors?.length || 1) - 1) * 0.5) * 4.0;
       const costumeCmids = resolveCostumeCmids(tmpl, ap.costumePreset);
+      const remapActionMap = <T extends Record<number, unknown>>(
+        mapObj: T,
+        remap: Array<{ origF: number; newF: number }>
+      ) => {
+        if (remap.length === 0) return;
+        const next: Record<number, unknown> = {};
+        for (const [fKey, val] of Object.entries(mapObj)) {
+          const fNum = Number(fKey);
+          let mappedF = fNum;
+          for (let r = 0; r < remap.length; r++) {
+            if (fNum === remap[r].origF) {
+              mappedF = remap[r].newF;
+              break;
+            }
+            if (r + 1 < remap.length && fNum > remap[r].origF && fNum < remap[r + 1].origF) {
+              const frac = (fNum - remap[r].origF) / Math.max(1, remap[r + 1].origF - remap[r].origF);
+              mappedF = Math.round(remap[r].newF + frac * (remap[r + 1].newF - remap[r].newF));
+              break;
+            }
+          }
+          if (fNum > remap[remap.length - 1].origF) {
+            const delta = fNum - remap[remap.length - 1].origF;
+            mappedF = Math.min(totalFrames, remap[remap.length - 1].newF + delta);
+          }
+          next[mappedF] = val;
+        }
+        for (const k of Object.keys(mapObj)) delete mapObj[Number(k)];
+        Object.assign(mapObj, next);
+      };
+
       const actorKfs = buildEntityKeyframes(ap.keyframes, totalFrames, defaultSlotX, 0, {
-        colorHex: ap.colorHex,
+        allowColor: false,
         startFrame: ap.startFrame,
         endFrame: ap.endFrame,
         isActor: true,
         entityName: catActor.name,
         allowSlowUser,
         actionMap: akfs,
-        onFinishEarlyMove: (arrivalFrame) => {
-          const hasLaterAction = Object.keys(akfs)
-            .map(Number)
-            .some((k) => k >= arrivalFrame);
-          if (!hasLaterAction) {
-            const actBefore = resolveActionNameAtFrame(akfs, Math.max(0, arrivalFrame - 1));
-            if (/walk|run|sneak|crawl/i.test(actBefore)) {
-              const restAct = tmpl?.actions.find((a) => /at rest/i.test(a.name)) ||
-                tmpl?.actions[0] || { anid: 0, name: 'At Rest' };
-              akfs[arrivalFrame] = { anid: restAct.anid, actionName: restAct.name };
+        onRemapFrames: (remap) => remapActionMap(akfs, remap),
+        onEnsureMoveLocomotion: (f0, f1, speed, dx, dy, dz, yStart, yEnd, rotYStart) => {
+          const curAct = resolveActionNameAtFrame(akfs, f0);
+          const horiz = Math.hypot(dx, dz);
+          const pickMoveAct = () => {
+            if (yStart > 1.2 || yEnd > 1.2 || (Math.abs(dy) > 1.4 && Math.abs(dy) > horiz * 0.6)) {
+              return tmpl ? resolveTemplateAction(tmpl, 'Fly') : { anid: 0, name: 'Fly' };
             }
+            if (horiz > 0.4) {
+              const yaw = Math.atan2(dx, dz);
+              // Check if intentionally backing up while facing opposite direction
+              if (Math.cos(rotYStart - yaw) < -0.65 && horiz < 7) {
+                const back = tmpl?.actions.find((a) => /walk backwards/i.test(a.name));
+                if (back) return back;
+              }
+            }
+            const target = speed >= 2.1 ? 'Run' : speed < 0.72 ? 'Walk Slowly' : 'Walk Fast';
+            return tmpl ? resolveTemplateAction(tmpl, target) : { anid: 0, name: target };
+          };
+          // If still At Rest (or non-locomotion pose over a big move) at move start f0, switch immediately to matching locomotion
+          const isAlreadyMovingAct = /walk|run|sneak|crawl|fly|jump|hop|fall/i.test(curAct);
+          if (/^at rest$/i.test(curAct.trim()) || (!isAlreadyMovingAct && Math.hypot(dx, dy, dz) > 2.2)) {
+            const moveAct = pickMoveAct();
+            akfs[f0] = { anid: moveAct.anid, actionName: moveAct.name };
+          }
+          // Eliminate mid-move At Rest dropouts strictly inside (f0, f1): move to arrival f1
+          for (const fkStr of Object.keys(akfs)) {
+            const fk = Number(fkStr);
+            if (fk > f0 && fk < f1 && /^at rest$/i.test(akfs[fk].actionName.trim())) {
+              const stopped = akfs[fk];
+              delete akfs[fk];
+              if (!akfs[f1]) akfs[f1] = stopped;
+            }
+          }
+        },
+        onEnsureStopRest: (stopFrame, nextMoveFrame, yPos) => {
+          const restAct = tmpl?.actions.find((a) => /^at rest$/i.test(a.name.trim())) ||
+            tmpl?.actions.find((a) => /at rest/i.test(a.name)) ||
+            tmpl?.actions[0] || { anid: 0, name: 'At Rest' };
+
+          // Pull any delayed "At Rest" sitting a few frames after stopFrame right onto stopFrame
+          const stopLimit = nextMoveFrame ?? totalFrames;
+          for (const fkStr of Object.keys(akfs)) {
+            const fk = Number(fkStr);
+            if (fk > stopFrame && fk < stopLimit && /^at rest$/i.test(akfs[fk].actionName.trim())) {
+              delete akfs[fk];
+            }
+          }
+
+          const curAtStop = resolveActionNameAtFrame(akfs, stopFrame);
+          const isLocomotion = /walk|run|sneak|crawl|fly|jump|hop/i.test(curAtStop);
+          // Switch to At Rest at stopFrame whenever locomotion was running (unless flying high in air)
+          const hoveringInAir = /fly/i.test(curAtStop) && yPos > 1.2;
+          if (isLocomotion && !hoveringInAir) {
+            akfs[stopFrame] = { anid: restAct.anid, actionName: restAct.name };
           }
         },
       });
@@ -959,12 +1001,13 @@ export async function generateAiMovie(options: {
       });
     }
 
-    // Resolve Props + real TMPLS.3CN ACTNs + costumes + non-uniform stretch + solid colorHex
+    // Resolve Props + real TMPLS.3CN ACTNs + costumes + non-uniform stretch + restricted colorHex
     const props: PropEntity[] = [];
     for (let pIdx = 0; pIdx < (sp.props || []).length; pIdx++) {
       const pp = sp.props![pIdx];
       const catProp = matchedPropsMap.get(pp.name) || findPropMatch(pp.name, catalog.props);
       const tmpl = templateCache.get(catProp.tmplCno) || null;
+      const canColorProp = isColorablePrimitiveProp(catProp.name);
 
       const pakfs: Record<number, PropActionKeyframe> = {};
       for (const seg of pp.actionSegments || []) {
@@ -1001,7 +1044,8 @@ export async function generateAiMovie(options: {
           pIdx % 2 === 0 ? -4.5 : 4.5,
           -2,
           {
-            colorHex: pp.colorHex,
+            colorHex: canColorProp ? pp.colorHex : undefined,
+            allowColor: canColorProp,
             startFrame: pp.startFrame,
             endFrame: pp.endFrame,
             isActor: false,
@@ -1027,15 +1071,15 @@ export async function generateAiMovie(options: {
         TDT_SHAPE_OPTIONS[0];
       const startF = Math.round(clamp(tp.startFrame ?? 0, 0, totalFrames));
       const endF = Math.round(clamp(tp.endFrame ?? totalFrames, startF, totalFrames));
-      const baseSc = tp.scale !== undefined ? clamp(tp.scale, 0.15, 7.0) : 0.7;
-      const sx = tp.scaleX !== undefined ? clamp(tp.scaleX, 0.15, 7.0) : baseSc;
-      const sy = tp.scaleY !== undefined ? clamp(tp.scaleY, 0.15, 7.0) : baseSc;
-      const sz = tp.scaleZ !== undefined ? clamp(tp.scaleZ, 0.15, 7.0) : baseSc;
+      const baseSc = tp.scale !== undefined ? clamp(tp.scale, 0.05, 8.0) : 0.7;
+      const sx = tp.scaleX !== undefined ? clamp(tp.scaleX, 0.05, 8.0) : baseSc;
+      const sy = tp.scaleY !== undefined ? clamp(tp.scaleY, 0.05, 8.0) : baseSc;
+      const sz = tp.scaleZ !== undefined ? clamp(tp.scaleZ, 0.05, 8.0) : baseSc;
       const tdtHex = validHex(tp.colorHex);
       const basePos: KeyframePosition = {
-        x: clamp(tp.x, -20, 20),
-        y: clamp(tp.y, -2, 16),
-        z: clamp(tp.z, -20, 18),
+        x: clamp(tp.x, -30, 30),
+        y: clamp(tp.y, -5, 22),
+        z: clamp(tp.z, -30, 30),
         ...(tp.rotX !== undefined && Number.isFinite(tp.rotX) ? { rotX: tp.rotX } : {}),
         rotY: tp.rotY !== undefined && Number.isFinite(tp.rotY) ? tp.rotY : 0,
         ...(tp.rotZ !== undefined && Number.isFinite(tp.rotZ) ? { rotZ: tp.rotZ } : {}),
@@ -1077,7 +1121,7 @@ export async function generateAiMovie(options: {
         text: textVal.slice(0, 28),
         tdfCno: font.tdfCno,
         tdts: shape.tdts,
-        mtrlCno: swatches[tIdx % Math.max(1, swatches.length)]?.mtrlCno,
+        mtrlCno: tdtPaletteSwatches[tIdx % Math.max(1, tdtPaletteSwatches.length)]?.mtrlCno,
         action: matchedTdtAction,
         actionKeyframes: {
           [startF]: { action: matchedTdtAction },
@@ -1086,7 +1130,7 @@ export async function generateAiMovie(options: {
       });
     }
 
-    // Resolve 2D onscreen text boxes & slow scrolling credits with accurate fonts & colors
+    // Resolve 2D onscreen text boxes & slow scrolling credits with accurate fonts, bold/italic & transparent or solid colors
     const textBoxes: ScreenTextBox[] = [];
     for (let bIdx = 0; bIdx < (sp.textBoxes || []).length; bIdx++) {
       const bp = sp.textBoxes![bIdx];
@@ -1096,21 +1140,27 @@ export async function generateAiMovie(options: {
       const endFrame = Math.round(clamp(bp.endFrame ?? totalFrames, startFrame, totalFrames));
       const isScrolling = Boolean(bp.isScrolling);
       const rect = rectForPlacement(bp.placement, isScrolling);
+      const reqFont = (bp.fontName || '').trim().replace(/['"]/g, '');
       const matchedFont =
-        FONT_2D_LIST.find((f) => f.toLowerCase() === (bp.fontName || '').trim().toLowerCase()) ||
-        (bp.fontName && bp.fontName.trim()) ||
-        'Comic Sans MS';
+        FONT_2D_LIST.find((f) => f.toLowerCase() === reqFont.toLowerCase()) ||
+        (reqFont.length > 0 ? reqFont : 'Arial');
       const fontSize = Math.round(
-        clamp(bp.fontSize ?? (isScrolling ? 16 : 15), 10, 40)
+        clamp(bp.fontSize ?? (isScrolling ? 16 : 16), 10, 44)
       );
+      const rawBg = (bp.bgColorHex || '').trim().toLowerCase();
+      const resolvedBg =
+        !rawBg || rawBg === 'transparent' || rawBg === 'none' || rawBg === 'clear'
+          ? undefined
+          : validHex(bp.bgColorHex);
       textBoxes.push({
         id: `ai_tbox_${sIdx}_${bIdx}_${Math.random().toString(36).slice(2, 6)}`,
         text: txt,
         fontName: matchedFont,
         fontSize,
         color: validHex(bp.colorHex) || '#fef08a',
-        bgColor: validHex(bp.bgColorHex) || (isScrolling ? undefined : '#1b0e36'),
-        bold: true,
+        ...(resolvedBg ? { bgColor: resolvedBg } : {}),
+        bold: bp.bold !== undefined ? Boolean(bp.bold) : !bp.italic,
+        ...(bp.italic !== undefined ? { italic: Boolean(bp.italic) } : {}),
         startFrame,
         endFrame,
         ...rect,
@@ -1118,9 +1168,10 @@ export async function generateAiMovie(options: {
       });
     }
 
-    // Populate pre-hydrated SNDS.3CN WAV, MIDS, custom .3MM voices/SFX, and Studio .MID cues
+    // Populate pre-hydrated SNDS.3CN WAV, MIDS, and custom .3MM voices/SFX cues
     const audios: ImportedAudioCue[] = [];
     const usedAudioKeys = new Set<string>();
+    const usedVoiceFrames = new Set<number>();
     for (let aIdx = 0; aIdx < (sp.audioCues || []).length; aIdx++) {
       const ac = sp.audioCues![aIdx];
       const cleanName = (ac.soundName || '').trim().toLowerCase();
@@ -1134,6 +1185,8 @@ export async function generateAiMovie(options: {
 
       const extracted = soundCache.get(match.cno);
       if (!extracted) continue;
+      const waitSpeech = match.category === 'speech' && !match.isMidi;
+      if (waitSpeech) usedVoiceFrames.add(f);
       audios.push({
         id: `ai_snd_${sIdx}_${aIdx}_${Math.random().toString(36).slice(2, 6)}`,
         frame: f,
@@ -1143,7 +1196,38 @@ export async function generateAiMovie(options: {
         isMidi: match.isMidi || extracted.isMidi,
         isCustomAudio: Boolean(extracted.isCustomAudio || match.midiFileUrl || match.sampleFile),
         loop: ac.loop ?? match.isMidi,
+        ...(waitSpeech ? { waitForFinish: true } : {}),
         ...(match.msndCno >= 0 && !match.sampleFile ? { msndCno: match.msndCno } : {}),
+      });
+    }
+
+    // Populate BonziBuddy-TTS / SAPI4 synthesized voice lines (with speed, pitch, and waitForFinish)
+    const sortedTts = [...(sp.ttsVoices || [])].sort((a, b) => (a.frame ?? 0) - (b.frame ?? 0));
+    for (let vIdx = 0; vIdx < sortedTts.length; vIdx++) {
+      const vp = sortedTts[vIdx];
+      const text = (vp.text || '').trim().slice(0, 220);
+      if (!text) continue;
+      const voice = (vp.voice || 'Adult Male #2, American English (TruVoice)').trim();
+      const key = `${voice}|${vp.pitch ?? ''}|${vp.speed ?? ''}|${text}`;
+      const synth = ttsResultMap.get(key);
+      if (!synth) continue;
+
+      let f = Math.round(clamp(vp.frame ?? 0, 0, totalFrames));
+      while (usedVoiceFrames.has(f) && f < totalFrames) {
+        f++;
+      }
+      usedVoiceFrames.add(f);
+      const speakerTag = vp.speaker ? `${vp.speaker.trim()}: ` : '';
+      audios.push({
+        id: `ai_tts_${sIdx}_${vIdx}_${Math.random().toString(36).slice(2, 6)}`,
+        frame: f,
+        filename: `${speakerTag}${text.slice(0, 28)}`,
+        audioData: synth.audioData,
+        isCustomAudio: true,
+        waitForFinish: vp.waitForFinish !== false,
+        ttsVoice: synth.voice,
+        ttsPitch: synth.pitch,
+        ttsSpeed: synth.speed,
       });
     }
 

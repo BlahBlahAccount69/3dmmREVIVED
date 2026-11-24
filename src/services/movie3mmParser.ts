@@ -19,6 +19,7 @@ import { parseGG, parseGL, readBmat34ToMatrix4, readFixed16, readTagReversed } f
 import {
   anidToTdtAction,
   CatalogSceneItem,
+  isCyclic3dmmAction,
   loadAction,
   loadTemplate,
   loadThreeDmmCatalog,
@@ -888,7 +889,11 @@ export async function loadOfficial3mmMovie(
             const act = loadedActions.get(activeAnid) || tmplObj?.actionCache.get(0);
             const celDwr =
               act && act.cels.length > 0
-                ? act.cels[Math.min(act.cels.length - 1, Math.max(0, celIdx))].dwr
+                ? act.cels[
+                    isCyclic3dmmAction(act.name)
+                      ? ((celIdx % act.cels.length) + act.cels.length) % act.cels.length
+                      : Math.min(act.cels.length - 1, Math.max(0, celIdx))
+                  ].dwr
                 : 0;
             const step = forcedStep !== null ? forcedStep : celDwr;
             celIdx++;

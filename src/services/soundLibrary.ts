@@ -14,6 +14,60 @@ export interface CatalogSoundItem {
   sourceLabel?: string;
 }
 
+export interface Sapi4VoicePreset {
+  id: string;
+  label: string;
+  minPitch: number;
+  maxPitch: number;
+  defPitch: number;
+  minSpeed: number;
+  maxSpeed: number;
+  defSpeed: number;
+}
+
+export const SAPI4_VOICES: Sapi4VoicePreset[] = [
+  { id: 'Adult Male #2, American English (TruVoice)', label: 'BonziBuddy (Adult Male #2, TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 140, minSpeed: 50, maxSpeed: 250, defSpeed: 157 },
+  { id: 'Adult Male #1, American English (TruVoice)', label: 'Adult Male #1 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 50, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
+  { id: 'Adult Male #3, American English (TruVoice)', label: 'Adult Male #3 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 110, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
+  { id: 'Adult Male #4, American English (TruVoice)', label: 'Adult Male #4 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 90, minSpeed: 50, maxSpeed: 250, defSpeed: 145 },
+  { id: 'Adult Female #1, American English (TruVoice)', label: 'Adult Female #1 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 200, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
+  { id: 'Adult Female #2, American English (TruVoice)', label: 'Adult Female #2 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 225, minSpeed: 50, maxSpeed: 250, defSpeed: 155 },
+  { id: 'Sam', label: 'Microsoft Sam', minPitch: 50, maxPitch: 200, defPitch: 100, minSpeed: 30, maxSpeed: 450, defSpeed: 150 },
+  { id: 'Mary', label: 'Microsoft Mary', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mary in Space', label: 'Mary in Space', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mike', label: 'Microsoft Mike', minPitch: 84, maxPitch: 338, defPitch: 112, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mike in Hall', label: 'Mike in Hall', minPitch: 84, maxPitch: 338, defPitch: 112, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+];
+
+export async function synthesizeSapi4Tts(params: {
+  text: string;
+  voice?: string;
+  pitch?: number;
+  speed?: number;
+}): Promise<{ audioData: string; voice: string; pitch: number; speed: number }> {
+  const res = await fetch('/api/tts/sapi4', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  const payload = (await res.json().catch(() => ({}))) as {
+    audioData?: string;
+    voice?: string;
+    pitch?: number;
+    speed?: number;
+    error?: string;
+  };
+  if (!res.ok || !payload.audioData) {
+    throw new Error(payload.error || `BonziBuddy SAPI4 TTS failed (${res.status}).`);
+  }
+  return {
+    audioData: payload.audioData,
+    voice: payload.voice || params.voice || 'Adult Male #2, American English (TruVoice)',
+    pitch: payload.pitch ?? params.pitch ?? 140,
+    speed: payload.speed ?? params.speed ?? 157,
+  };
+}
+
 export const SAMPLE_CUSTOM_AUDIO_ITEMS: CatalogSoundItem[] = [
   // Custom Voices & SFX embedded inside sample .3MM movies
   { cno: 900101, msndCno: 1, name: 'it worked!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
@@ -55,21 +109,6 @@ export const SAMPLE_CUSTOM_AUDIO_ITEMS: CatalogSoundItem[] = [
   { cno: 900601, msndCno: 0, name: "Where's my doggy", category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
   { cno: 900602, msndCno: 1, name: 'Rover', category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
   { cno: 900603, msndCno: 4, name: 'Yipee (Custom)', category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
-  // Custom Studio MIDI Music Tracks
-  { cno: 910001, msndCno: -1, name: 'BAKSTAGE.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/BAKSTAGE.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910002, msndCno: -1, name: 'BOOTHJAM.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/BOOTHJAM.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910003, msndCno: -1, name: 'CLOSET.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/CLOSET.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910004, msndCno: -1, name: 'COASTER.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/COASTER.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910005, msndCno: -1, name: 'FADER.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/FADER.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910006, msndCno: -1, name: 'IDEAS.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/IDEAS.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910007, msndCno: -1, name: 'JAMLOOP.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/JAMLOOP.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910008, msndCno: -1, name: 'LOBBY.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/LOBBY.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910009, msndCno: -1, name: 'PROJECT.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/PROJECT.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910010, msndCno: -1, name: 'SNACK.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/SNACK.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910011, msndCno: -1, name: 'SPLASH.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/SPLASH.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910012, msndCno: -1, name: 'STUDIO.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/STUDIO.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910013, msndCno: -1, name: 'TAG.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/TAG.MID', sourceLabel: 'Studio MIDI' },
-  { cno: 910014, msndCno: -1, name: 'THEATER.MID', category: 'music', isMidi: true, midiFileUrl: '3dmm/midi/THEATER.MID', sourceLabel: 'Studio MIDI' },
 ];
 
 const MS_ADPCM_ADAPTATION = [
@@ -352,6 +391,27 @@ class Sound3DMMManager {
   private activeUiSource: AudioBufferSourceNode | null = null;
   private activeSfxSources = new Set<AudioBufferSourceNode>();
   private activeLoopSfxSources = new Set<AudioBufferSourceNode>();
+  private activeBlockingVoices = new Map<string, { startedAt: number; expectedEndAt: number }>();
+
+  public markPendingVoice(id: string, maxWaitMs = 25000) {
+    const now = performance.now();
+    this.activeBlockingVoices.set(id, { startedAt: now, expectedEndAt: now + maxWaitMs });
+  }
+
+  public clearPendingVoice(id: string) {
+    this.activeBlockingVoices.delete(id);
+  }
+
+  public isWaitingForVoice(): boolean {
+    if (this.activeBlockingVoices.size === 0) return false;
+    const now = performance.now();
+    for (const [id, info] of this.activeBlockingVoices.entries()) {
+      if (now >= info.expectedEndAt || now - info.startedAt > 30000) {
+        this.activeBlockingVoices.delete(id);
+      }
+    }
+    return this.activeBlockingVoices.size > 0;
+  }
 
   private ensureCtx(): AudioContext {
     if (!this.ctx) {
@@ -444,6 +504,7 @@ class Sound3DMMManager {
       }
     });
     this.activeSfxSources.clear();
+    this.activeBlockingVoices.clear();
     if (this.activeSource) {
       try {
         this.activeSource.stop();
@@ -457,6 +518,7 @@ class Sound3DMMManager {
   public stopAll() {
     midiPlayer.stop();
     this.stopSfx();
+    this.activeBlockingVoices.clear();
     if (this.activeUiSource) {
       try {
         this.activeUiSource.stop();
@@ -752,7 +814,9 @@ class Sound3DMMManager {
       return;
     }
     if (cue.audioData) {
-      await this.playBase64Audio(cue.id, cue.audioData, Boolean(cue.loop));
+      const waitVoice = Boolean(cue.waitForFinish && !cue.loop);
+      if (waitVoice) this.markPendingVoice(cue.id);
+      await this.playBase64Audio(cue.id, cue.audioData, Boolean(cue.loop), false, waitVoice);
       return;
     }
     if (cue.msndCno !== undefined && cue.msndCno >= 0) {
@@ -772,7 +836,13 @@ class Sound3DMMManager {
     await midiPlayer.playMidiUrl(url, { loop, audioCtx: ctx });
   }
 
-  public async playBase64Audio(_id: string, audioDataUrl: string, loop = false, waitEnd = false) {
+  public async playBase64Audio(
+    id: string,
+    audioDataUrl: string,
+    loop = false,
+    waitEnd = false,
+    blockingVoice = false
+  ) {
     try {
       const ctx = await this.ensureReadyCtx();
       const rawBytes = audioDataUrl.includes(',')
@@ -786,22 +856,37 @@ class Sound3DMMManager {
       src.connect(this.getOutputNode(ctx));
       this.activeSfxSources.add(src);
       if (loop) this.activeLoopSfxSources.add(src);
+      if (blockingVoice) {
+        const now = performance.now();
+        this.activeBlockingVoices.set(id, {
+          startedAt: now,
+          expectedEndAt: now + Math.max(150, buf.duration * 1000) + 120,
+        });
+      }
       await new Promise<void>((resolve) => {
         src.onended = () => {
           this.activeSfxSources.delete(src);
           this.activeLoopSfxSources.delete(src);
+          if (blockingVoice) this.activeBlockingVoices.delete(id);
           resolve();
         };
         src.start();
         if (!waitEnd) resolve();
       });
     } catch {
+      if (blockingVoice) this.activeBlockingVoices.delete(id);
       try {
         const audio = new Audio(audioDataUrl);
         audio.loop = Boolean(loop);
-        void audio.play();
+        if (blockingVoice) {
+          audio.onended = () => this.activeBlockingVoices.delete(id);
+          audio.onerror = () => this.activeBlockingVoices.delete(id);
+        }
+        void audio.play().catch(() => {
+          if (blockingVoice) this.activeBlockingVoices.delete(id);
+        });
       } catch {
-        // ignore
+        if (blockingVoice) this.activeBlockingVoices.delete(id);
       }
     }
   }
@@ -811,20 +896,28 @@ class Sound3DMMManager {
    * returning a base64 DataURL ready to save directly into the single .3mm.json file.
    */
   public async bitcrushAudioFile(file: File): Promise<string> {
+    return this.bitcrushAudioBlob(file, 15.0);
+  }
+
+  /**
+   * Decodes and bitcrushes any audio Blob (recorded voice or uploaded clip) to authentic
+   * 22050Hz mono 8-bit PCM WAV DataURL so it plays everywhere and packs directly into .3mm MSND chunks.
+   */
+  public async bitcrushAudioBlob(blob: Blob, maxSeconds = 30.0): Promise<string> {
     const ctx = this.ensureCtx();
-    const arrayBuffer = await file.arrayBuffer();
+    const arrayBuffer = await blob.arrayBuffer();
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
 
     const targetRate = 22050;
-    const duration = Math.min(audioBuffer.duration, 10.0);
+    const duration = Math.max(0.1, Math.min(audioBuffer.duration, maxSeconds));
     const offlineCtx = new OfflineAudioContext(1, Math.max(1, Math.floor(targetRate * duration)), targetRate);
     const source = offlineCtx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(offlineCtx.destination);
     source.start(0);
     const resampled = await offlineCtx.startRendering();
-    const blob = encodeAudioBufferToWav(resampled, true);
-    return blobToBase64(blob);
+    const wavBlob = encodeAudioBufferToWav(resampled, true);
+    return blobToBase64(wavBlob);
   }
 }
 

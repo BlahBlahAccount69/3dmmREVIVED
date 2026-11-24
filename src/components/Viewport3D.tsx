@@ -34,9 +34,135 @@ export type StageEntityType = 'actor' | 'prop' | 'tdt' | 'tbox';
 
 export interface TransitionOverlayState {
   mode: SceneTransition;
-  opacity: number;
-  snapshotDataUrl?: string | null;
+  phase?: 'out' | 'in';
+  progress: number;
+  snapshotImageData?: ImageData | null;
 }
+
+const TRANSITION_STAGE_W = 544;
+const TRANSITION_STAGE_H = 306;
+const TRANSITION_TOTAL_PIXELS = TRANSITION_STAGE_W * TRANSITION_STAGE_H;
+
+// Exact kauai/SRC/GFX.CPP GNV::Dissolve primitive-root permutation (klwPrime=65537, klwRoot=32767)
+const DISSOLVE_PIXEL_ORDER: Uint32Array = (() => {
+  const order = new Uint32Array(TRANSITION_TOTAL_PIXELS);
+  const KLW_PRIME = 65537;
+  const KLW_ROOT = 32767;
+  let lw = 1;
+  let irc = TRANSITION_TOTAL_PIXELS - lw;
+  let outIdx = 0;
+  while (outIdx < TRANSITION_TOTAL_PIXELS) {
+    if (irc >= 0) {
+      order[outIdx++] = irc;
+      irc -= KLW_PRIME - 1;
+    }
+    while (irc < 0 && outIdx < TRANSITION_TOTAL_PIXELS) {
+      lw = (lw * KLW_ROOT) % KLW_PRIME;
+      irc = TRANSITION_TOTAL_PIXELS - lw;
+    }
+  }
+  return order;
+})();
+
+const ThreeDmmDissolveCanvas: React.FC<{ overlay: TransitionOverlayState }> = ({ overlay }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const imageDataRef = useRef<ImageData | null>(null);
+  const cursorRef = useRef<{ key: string; count: number }>({ key: '', count: 0 });
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    if (!imageDataRef.current) {
+      imageDataRef.current = ctx.createImageData(TRANSITION_STAGE_W, TRANSITION_STAGE_H);
+    }
+    const imgData = imageDataRef.current;
+    const buf = imgData.data;
+
+    const phase = overlay.phase || 'in';
+    const snapTag = overlay.snapshotImageData ? 'snap' : 'nosnap';
+    const key = `${overlay.mode}:${phase}:${snapTag}`;
+
+    if (cursorRef.current.key !== key) {
+      cursorRef.current = { key, count: 0 };
+      if (overlay.mode === 'dissolve') {
+        if (overlay.snapshotImageData && overlay.snapshotImageData.data.length === buf.length) {
+          buf.set(overlay.snapshotImageData.data);
+        } else {
+          buf.fill(0);
+        }
+      } else {
+        const fillC = overlay.mode === 'fadeToWhite' ? 255 : 0;
+        if (phase === 'out') {
+          buf.fill(0);
+        } else {
+          for (let i = 0; i < TRANSITION_TOTAL_PIXELS; i++) {
+            const o = i * 4;
+            buf[o] = fillC;
+            buf[o + 1] = fillC;
+            buf[o + 2] = fillC;
+            buf[o + 3] = 255;
+          }
+        }
+      }
+    }
+
+    const p = Math.max(0, Math.min(1, overlay.progress));
+    const targetCount = Math.floor(p * TRANSITION_TOTAL_PIXELS);
+    let prevCount = cursorRef.current.count;
+
+    // If scrubbing backwards unexpectedly, reset cleanly
+    if (targetCount < prevCount) {
+      prevCount = 0;
+      cursorRef.current.key = '';
+      // Re-init on next step; reset immediately right here
+      if (overlay.mode === 'dissolve' && overlay.snapshotImageData) {
+        buf.set(overlay.snapshotImageData.data);
+      } else if (phase === 'out') {
+        buf.fill(0);
+      } else {
+        const fillC = overlay.mode === 'fadeToWhite' ? 255 : 0;
+        for (let i = 0; i < TRANSITION_TOTAL_PIXELS; i++) {
+          const o = i * 4;
+          buf[o] = fillC;
+          buf[o + 1] = fillC;
+          buf[o + 2] = fillC;
+          buf[o + 3] = 255;
+        }
+      }
+      cursorRef.current.key = key;
+    }
+
+    if (overlay.mode === 'dissolve' || phase === 'in') {
+      for (let k = prevCount; k < targetCount; k++) {
+        buf[DISSOLVE_PIXEL_ORDER[k] * 4 + 3] = 0;
+      }
+    } else {
+      const fillC = overlay.mode === 'fadeToWhite' ? 255 : 0;
+      for (let k = prevCount; k < targetCount; k++) {
+        const o = DISSOLVE_PIXEL_ORDER[k] * 4;
+        buf[o] = fillC;
+        buf[o + 1] = fillC;
+        buf[o + 2] = fillC;
+        buf[o + 3] = 255;
+      }
+    }
+
+    cursorRef.current.count = targetCount;
+    ctx.putImageData(imgData, 0, 0);
+  }, [overlay]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={TRANSITION_STAGE_W}
+      height={TRANSITION_STAGE_H}
+      className="absolute inset-0 z-30 w-full h-full pointer-events-none image-rendering-pixelated"
+    />
+  );
+};
 
 export interface LivePlayheadState {
   sceneIndex: number;
@@ -62,7 +188,7 @@ interface Viewport3DProps {
   onSelectEntity: (id: string | null, type: StageEntityType | null) => void;
   onUpdateTextBox?: (id: string, patch: Partial<ScreenTextBox>) => void;
   transitionOverlay?: TransitionOverlayState | null;
-  stageCaptureRef?: React.MutableRefObject<(() => string | null) | null>;
+  stageCaptureRef?: React.MutableRefObject<(() => ImageData | null) | null>;
   onStageViewReady?: (view: LoadedBackgroundView) => void;
   moveUpDownMode: boolean;
   onToggleMoveUpDown: () => void;
@@ -99,7 +225,7 @@ function resolveCssFontFamily(fontName?: string): string {
   if (low.includes('comic')) {
     return `"${raw}", "Comic Sans MS", "Comic Neue", "Chalkboard SE", cursive, sans-serif`;
   }
-  if (low.includes('futura')) {
+  if (low.includes('futura') || low.includes('century')) {
     return `"${raw}", Futura, "Century Gothic", "Trebuchet MS", sans-serif`;
   }
   if (low.includes('times')) {
@@ -638,18 +764,18 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       try {
         renderer.render(scene, camera);
         const outCanvas = document.createElement('canvas');
-        outCanvas.width = 544;
-        outCanvas.height = 306;
+        outCanvas.width = TRANSITION_STAGE_W;
+        outCanvas.height = TRANSITION_STAGE_H;
         const ctx = outCanvas.getContext('2d');
         if (!ctx) return null;
         ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, 544, 306);
+        ctx.fillRect(0, 0, TRANSITION_STAGE_W, TRANSITION_STAGE_H);
         const bgImg = backdropImgRef.current;
         if (bgImg && bgImg.complete && bgImg.naturalWidth > 0) {
-          ctx.drawImage(bgImg, 0, 0, 544, 306);
+          ctx.drawImage(bgImg, 0, 0, TRANSITION_STAGE_W, TRANSITION_STAGE_H);
         }
-        ctx.drawImage(renderer.domElement, 0, 0, 544, 306);
-        return outCanvas.toDataURL('image/png');
+        ctx.drawImage(renderer.domElement, 0, 0, TRANSITION_STAGE_W, TRANSITION_STAGE_H);
+        return ctx.getImageData(0, 0, TRANSITION_STAGE_W, TRANSITION_STAGE_H);
       } catch {
         return null;
       }
@@ -2438,29 +2564,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           );
         })}
 
-        {/* Authentic Scene Transition Overlay (Cut / Fade to Black / Fade to White / Dissolve) */}
-        {transitionOverlay && transitionOverlay.opacity > 0.004 && (
-          <div
-            className="absolute inset-0 z-30 pointer-events-none"
-            style={{ opacity: Math.max(0, Math.min(1, transitionOverlay.opacity)) }}
-          >
-            {transitionOverlay.mode === 'dissolve' && transitionOverlay.snapshotDataUrl ? (
-              <img
-                src={transitionOverlay.snapshotDataUrl}
-                alt=""
-                draggable={false}
-                className="w-full h-full object-fill"
-              />
-            ) : (
-              <div
-                className="w-full h-full"
-                style={{
-                  backgroundColor:
-                    transitionOverlay.mode === 'fadeToWhite' ? '#ffffff' : '#000000',
-                }}
-              />
-            )}
-          </div>
+        {/* Authentic 1995 Microsoft 3DMM Pixel-Dissolve Transitions (kauai/SRC/GFX.CPP GNV::Dissolve) */}
+        {transitionOverlay && transitionOverlay.mode !== 'cut' && (
+          <ThreeDmmDissolveCanvas overlay={transitionOverlay} />
         )}
 
         {loadingStage && (

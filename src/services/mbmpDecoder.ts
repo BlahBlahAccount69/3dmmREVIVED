@@ -235,6 +235,29 @@ export function decodeTmapToTexture(tmapBytes: Uint8Array, palette: Palette256):
   return tex;
 }
 
+export function decodeTmapToDataUrl(tmapBytes: Uint8Array, palette: Palette256): string | null {
+  const tex = decodeTmapToTexture(tmapBytes, palette);
+  if (!tex || typeof document === 'undefined') return null;
+  const img = tex.image as { data: Uint8Array; width: number; height: number } | undefined;
+  if (!img || !img.data || img.width <= 0 || img.height <= 0) {
+    tex.dispose();
+    return null;
+  }
+  const c = document.createElement('canvas');
+  c.width = img.width;
+  c.height = img.height;
+  const ctx = c.getContext('2d');
+  if (!ctx) {
+    tex.dispose();
+    return null;
+  }
+  const imgData = new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
+  ctx.putImageData(imgData, 0, 0);
+  const url = c.toDataURL('image/png');
+  tex.dispose();
+  return url;
+}
+
 /**
  * Extracts the dominant uniform skin tone hex from an actor's 8-bit indexed face/skin TMAP
  * (sampling lower chin/cheek & side border pixels, skipping background/black/eye pixels)
