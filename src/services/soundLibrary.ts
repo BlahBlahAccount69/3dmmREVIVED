@@ -12,6 +12,7 @@ export interface CatalogSoundItem {
   sampleFile?: string;
   midiFileUrl?: string;
   sourceLabel?: string;
+  aiOnly?: boolean;
 }
 
 export interface Sapi4VoicePreset {
@@ -26,17 +27,27 @@ export interface Sapi4VoicePreset {
 }
 
 export const SAPI4_VOICES: Sapi4VoicePreset[] = [
-  { id: 'Adult Male #2, American English (TruVoice)', label: 'BonziBuddy (Adult Male #2, TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 140, minSpeed: 50, maxSpeed: 250, defSpeed: 157 },
-  { id: 'Adult Male #1, American English (TruVoice)', label: 'Adult Male #1 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 50, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
-  { id: 'Adult Male #3, American English (TruVoice)', label: 'Adult Male #3 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 110, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
-  { id: 'Adult Male #4, American English (TruVoice)', label: 'Adult Male #4 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 90, minSpeed: 50, maxSpeed: 250, defSpeed: 145 },
-  { id: 'Adult Female #1, American English (TruVoice)', label: 'Adult Female #1 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 200, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
-  { id: 'Adult Female #2, American English (TruVoice)', label: 'Adult Female #2 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 225, minSpeed: 50, maxSpeed: 250, defSpeed: 155 },
   { id: 'Sam', label: 'Microsoft Sam', minPitch: 50, maxPitch: 200, defPitch: 100, minSpeed: 30, maxSpeed: 450, defSpeed: 150 },
-  { id: 'Mary', label: 'Microsoft Mary', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
-  { id: 'Mary in Space', label: 'Mary in Space', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
   { id: 'Mike', label: 'Microsoft Mike', minPitch: 84, maxPitch: 338, defPitch: 112, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mary', label: 'Microsoft Mary', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Adult Male #1, American English (TruVoice)', label: 'Adult Male #1 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 50, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
+  { id: 'Adult Female #1, American English (TruVoice)', label: 'Adult Female #1 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 200, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
+  { id: 'Adult Male #3, American English (TruVoice)', label: 'Adult Male #3 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 110, minSpeed: 50, maxSpeed: 250, defSpeed: 150 },
+  { id: 'Adult Female #2, American English (TruVoice)', label: 'Adult Female #2 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 225, minSpeed: 50, maxSpeed: 250, defSpeed: 155 },
+  { id: 'Adult Male #4, American English (TruVoice)', label: 'Adult Male #4 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 90, minSpeed: 50, maxSpeed: 250, defSpeed: 145 },
+  { id: 'Adult Male #5, American English (TruVoice)', label: 'Adult Male #5 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 130, minSpeed: 50, maxSpeed: 250, defSpeed: 155 },
+  { id: 'Adult Male #6, American English (TruVoice)', label: 'Adult Male #6 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 100, minSpeed: 50, maxSpeed: 250, defSpeed: 145 },
+  { id: 'Adult Male #7, American English (TruVoice)', label: 'Adult Male #7 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 150, minSpeed: 50, maxSpeed: 250, defSpeed: 160 },
+  { id: 'Adult Male #8, American English (TruVoice)', label: 'Adult Male #8 (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 80, minSpeed: 50, maxSpeed: 250, defSpeed: 140 },
+  { id: 'Mary in Space', label: 'Mary in Space', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mary in Hall', label: 'Mary in Hall', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mary in Stadium', label: 'Mary in Stadium', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mary (for Telephone)', label: 'Mary (for Telephone)', minPitch: 84, maxPitch: 338, defPitch: 169, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mike in Space', label: 'Mike in Space', minPitch: 84, maxPitch: 338, defPitch: 112, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
   { id: 'Mike in Hall', label: 'Mike in Hall', minPitch: 84, maxPitch: 338, defPitch: 112, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mike in Stadium', label: 'Mike in Stadium', minPitch: 84, maxPitch: 338, defPitch: 112, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Mike (for Telephone)', label: 'Mike (for Telephone)', minPitch: 84, maxPitch: 338, defPitch: 112, minSpeed: 30, maxSpeed: 510, defSpeed: 170 },
+  { id: 'Adult Male #2, American English (TruVoice)', label: 'Adult Male #2 / Bonzi (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 140, minSpeed: 50, maxSpeed: 250, defSpeed: 157 },
 ];
 
 export async function synthesizeSapi4Tts(params: {
@@ -58,18 +69,18 @@ export async function synthesizeSapi4Tts(params: {
     error?: string;
   };
   if (!res.ok || !payload.audioData) {
-    throw new Error(payload.error || `BonziBuddy SAPI4 TTS failed (${res.status}).`);
+    throw new Error(payload.error || `SAPI4 TTS failed (${res.status}).`);
   }
   return {
     audioData: payload.audioData,
-    voice: payload.voice || params.voice || 'Adult Male #2, American English (TruVoice)',
-    pitch: payload.pitch ?? params.pitch ?? 140,
-    speed: payload.speed ?? params.speed ?? 157,
+    voice: payload.voice || params.voice || 'Sam',
+    pitch: payload.pitch ?? params.pitch ?? 100,
+    speed: payload.speed ?? params.speed ?? 150,
   };
 }
 
 export const SAMPLE_CUSTOM_AUDIO_ITEMS: CatalogSoundItem[] = [
-  // Custom Voices & SFX embedded inside sample .3MM movies
+  // Custom Voices & SFX embedded inside sample .3MM movies (used by AI Director only, hidden from manual picker)
   { cno: 900101, msndCno: 1, name: 'it worked!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
   { cno: 900102, msndCno: 3, name: 'Follow me!', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
   { cno: 900103, msndCno: 4, name: 'Council of Drs', category: 'speech', isMidi: false, sampleFile: 'HOSPITAL.3MM', sourceLabel: 'HOSPITAL.3MM' },
@@ -98,16 +109,18 @@ export const SAMPLE_CUSTOM_AUDIO_ITEMS: CatalogSoundItem[] = [
   { cno: 900310, msndCno: 9, name: 'Hey, there...', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
   { cno: 900311, msndCno: 10, name: 'Cool. Got it.', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
   { cno: 900312, msndCno: 11, name: "Whoa. I'm out...", category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
+  { cno: 900315, msndCno: 14, name: 'Ahhh! (Echo)', category: 'sfx', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
   { cno: 900313, msndCno: 15, name: "ok there's", category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
   { cno: 900314, msndCno: 16, name: 'down the hall', category: 'speech', isMidi: false, sampleFile: 'THEBOOK.3MM', sourceLabel: 'THEBOOK.3MM' },
   { cno: 900401, msndCno: 0, name: 'Hey watch it!', category: 'speech', isMidi: false, sampleFile: 'THETHIEF.3MM', sourceLabel: 'THETHIEF.3MM' },
   { cno: 900402, msndCno: 2, name: "You're coming", category: 'speech', isMidi: false, sampleFile: 'THETHIEF.3MM', sourceLabel: 'THETHIEF.3MM' },
   { cno: 900501, msndCno: 0, name: 'static.wav', category: 'sfx', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
-  { cno: 900502, msndCno: 2, name: 'look3.wav', category: 'speech', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
-  { cno: 900503, msndCno: 4, name: 'mega.wav', category: 'speech', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
-  { cno: 900504, msndCno: 5, name: 'ebase.WAV', category: 'speech', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
+  { cno: 900502, msndCno: 2, name: 'look3.wav', category: 'sfx', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
+  { cno: 900503, msndCno: 4, name: 'mega.wav', category: 'sfx', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
+  { cno: 900504, msndCno: 5, name: 'ebase.WAV', category: 'sfx', isMidi: false, sampleFile: 'VENUS31.3MM', sourceLabel: 'VENUS31.3MM' },
   { cno: 900601, msndCno: 0, name: "Where's my doggy", category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
   { cno: 900602, msndCno: 1, name: 'Rover', category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
+  { cno: 900604, msndCno: 3, name: 'Rover (Short)', category: 'sfx', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
   { cno: 900603, msndCno: 4, name: 'Yipee (Custom)', category: 'speech', isMidi: false, sampleFile: 'WHERE.3MM', sourceLabel: 'WHERE.3MM' },
 ];
 

@@ -2,11 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ImportedAudioCue } from '../types/movie';
 import {
   CatalogSoundItem,
-  SAPI4_VOICES,
   sound3DMM,
-  synthesizeSapi4Tts,
 } from '../services/soundLibrary';
-import { Bot, Mic, Music, Play, RotateCcw, Square, Upload, Volume2 } from 'lucide-react';
+import { Mic, Music, Play, RotateCcw, Square, Upload, Volume2 } from 'lucide-react';
 import { assetUrl } from '../utils/assetUrl';
 
 interface AudioImportModalProps {
@@ -24,7 +22,7 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
   onClose,
   onAddAudioCue,
 }) => {
-  const [tab, setTab] = useState<'sfx' | 'speech' | 'music' | 'record' | 'tts' | 'custom'>('sfx');
+  const [tab, setTab] = useState<'sfx' | 'speech' | 'music' | 'record' | 'custom'>('sfx');
   const [catalog, setCatalog] = useState<CatalogSoundItem[]>([]);
   const [search, setSearch] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -38,14 +36,6 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
   const [recordedDataUrl, setRecordedDataUrl] = useState<string | null>(null);
   const [recordedDurationSec, setRecordedDurationSec] = useState(0);
   const [recordWaitForFinish, setRecordWaitForFinish] = useState(true);
-
-  // BonziBuddy / SAPI4 TTS state
-  const [ttsText, setTtsText] = useState('Hello there! Expand dong in 3D Movie Maker!');
-  const [ttsVoice, setTtsVoice] = useState(SAPI4_VOICES[0].id);
-  const [ttsPitch, setTtsPitch] = useState(SAPI4_VOICES[0].defPitch);
-  const [ttsSpeed, setTtsSpeed] = useState(SAPI4_VOICES[0].defSpeed);
-  const [ttsWaitForFinish, setTtsWaitForFinish] = useState(true);
-  const [ttsAudioData, setTtsAudioData] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -99,7 +89,7 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
     // Hide embedded sample .3MM voices & sounds from the manual user picker (AI director still uses them)
     sound3DMM
       .loadSoundCatalog()
-      .then((items) => setCatalog(items.filter((s) => !s.sampleFile)))
+      .then((items) => setCatalog(items.filter((s) => !s.sampleFile && !s.aiOnly)))
       .catch(console.error);
     return () => {
       cleanupRecordingResources(true);
@@ -111,13 +101,12 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
   const filtered = catalog.filter(
     (s) =>
       !s.sampleFile &&
+      !s.aiOnly &&
       ((tab === 'sfx' && s.category === 'sfx') ||
         (tab === 'speech' && s.category === 'speech') ||
         (tab === 'music' && s.category === 'music')) &&
       s.name.toLowerCase().includes(search.trim().toLowerCase())
   );
-
-  const activeSapiVoice = SAPI4_VOICES.find((v) => v.id === ttsVoice) || SAPI4_VOICES[0];
 
   const handleSelectCatalogSound = async (item: CatalogSoundItem) => {
     setIsProcessing(true);
@@ -309,46 +298,6 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
     onClose();
   };
 
-  const handleGenerateTts = async (addImmediately: boolean) => {
-    const clean = ttsText.trim();
-    if (!clean) {
-      setErrorMsg('Enter text to synthesize.');
-      return;
-    }
-    setIsProcessing(true);
-    setErrorMsg(null);
-    try {
-      const res = await synthesizeSapi4Tts({
-        text: clean,
-        voice: ttsVoice,
-        pitch: ttsPitch,
-        speed: ttsSpeed,
-      });
-      setTtsAudioData(res.audioData);
-      if (addImmediately) {
-        onAddAudioCue({
-          id: 'snd_' + Math.random().toString(36).substring(2, 9),
-          frame: currentFrame,
-          filename: `TTS: ${clean.slice(0, 24)}`,
-          audioData: res.audioData,
-          isCustomAudio: true,
-          waitForFinish: ttsWaitForFinish,
-          ttsVoice: res.voice,
-          ttsPitch: res.pitch,
-          ttsSpeed: res.speed,
-        });
-        void sound3DMM.playBase64Audio('tts_preview', res.audioData);
-        onClose();
-      } else {
-        void sound3DMM.playBase64Audio('tts_preview', res.audioData);
-      }
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'BonziBuddy SAPI4 TTS generation failed.');
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
   const handleSwitchTab = (nextTab: typeof tab) => {
     if (isRecording) stopRecording();
     setErrorMsg(null);
@@ -416,14 +365,6 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
             🎤 Record Voice
           </button>
           <button
-            onClick={() => handleSwitchTab('tts')}
-            className={`px-2 py-1 font-bold ${
-              tab === 'tts' ? 'bg-indigo-700 border-2 border-amber-300 text-white' : 'studio-btn text-indigo-200'
-            }`}
-          >
-            🤖 Bonzi TTS
-          </button>
-          <button
             onClick={() => handleSwitchTab('custom')}
             className={`px-2 py-1 font-bold ${
               tab === 'custom' ? 'bg-amber-700 border-2 border-amber-200 text-white' : 'studio-btn text-amber-200'
@@ -434,149 +375,7 @@ export const AudioImportModal: React.FC<AudioImportModalProps> = ({
         </div>
 
         <div className="p-3 flex flex-col gap-2.5 flex-1 min-h-0 overflow-y-auto">
-          {tab === 'tts' ? (
-            <div className="flex flex-col gap-2.5 py-1">
-              <div className="studio-well p-2.5 text-purple-200 leading-relaxed flex items-center gap-2">
-                <Bot size={16} className="text-indigo-300 shrink-0" />
-                <span>
-                  Synthesize BonziBuddy / SAPI4 TruVoice speech with exact pitch &amp; speed, packed right into your movie!
-                </span>
-              </div>
-
-              <div className="flex flex-col gap-1">
-                <label className="text-purple-200 font-semibold">Voice Profile</label>
-                <div className="flex gap-1.5">
-                  <select
-                    value={ttsVoice}
-                    onChange={(e) => {
-                      const next = SAPI4_VOICES.find((v) => v.id === e.target.value) || SAPI4_VOICES[0];
-                      setTtsVoice(next.id);
-                      setTtsPitch(next.defPitch);
-                      setTtsSpeed(next.defSpeed);
-                      setTtsAudioData(null);
-                    }}
-                    className="studio-well flex-1 px-2 py-1.5 text-white text-xs"
-                  >
-                    {SAPI4_VOICES.map((v) => (
-                      <option key={v.id} value={v.id} className="bg-[#1b0b38]">
-                        {v.label}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const bonzi = SAPI4_VOICES[0];
-                      setTtsVoice(bonzi.id);
-                      setTtsPitch(140);
-                      setTtsSpeed(157);
-                      setTtsAudioData(null);
-                    }}
-                    className="studio-btn px-2 py-1 text-[11px] text-purple-100 shrink-0"
-                    title="Reset to BonziBuddy preset (pitch 140, speed 157)"
-                  >
-                    Bonzi Preset
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-1">
-                <label className="text-purple-200 font-semibold">Spoken Text</label>
-                <textarea
-                  rows={2}
-                  maxLength={240}
-                  value={ttsText}
-                  onChange={(e) => {
-                    setTtsText(e.target.value);
-                    setTtsAudioData(null);
-                  }}
-                  placeholder="Type dialogue for BonziBuddy / SAPI4..."
-                  className="studio-well px-2.5 py-1.5 text-white text-xs focus:outline-none resize-none"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="studio-well p-2 flex flex-col gap-1">
-                  <div className="flex justify-between text-[11px]">
-                    <span className="text-purple-200 font-semibold">Pitch</span>
-                    <span className="text-amber-300 font-mono">{ttsPitch}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={activeSapiVoice.minPitch}
-                    max={activeSapiVoice.maxPitch}
-                    value={ttsPitch}
-                    onChange={(e) => {
-                      setTtsPitch(Number(e.target.value));
-                      setTtsAudioData(null);
-                    }}
-                  />
-                </div>
-                <div className="studio-well p-2 flex flex-col gap-1">
-                  <div className="flex justify-between text-[11px]">
-                    <span className="text-purple-200 font-semibold">Speed</span>
-                    <span className="text-amber-300 font-mono">{ttsSpeed}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={activeSapiVoice.minSpeed}
-                    max={activeSapiVoice.maxSpeed}
-                    value={ttsSpeed}
-                    onChange={(e) => {
-                      setTtsSpeed(Number(e.target.value));
-                      setTtsAudioData(null);
-                    }}
-                  />
-                </div>
-              </div>
-
-              <label className="flex items-center gap-2 text-[11px] text-purple-100 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={ttsWaitForFinish}
-                  onChange={(e) => setTtsWaitForFinish(e.target.checked)}
-                />
-                <span>Wait for voice to finish before advancing frame</span>
-              </label>
-
-              <div className="flex items-center gap-2 pt-1">
-                <button
-                  type="button"
-                  disabled={isProcessing}
-                  onClick={() => void handleGenerateTts(false)}
-                  className="studio-btn px-3 py-1.5 flex items-center gap-1.5 font-semibold disabled:opacity-50"
-                >
-                  <Play size={12} fill="currentColor" />
-                  <span>{isProcessing ? 'Synthesizing...' : ttsAudioData ? 'Replay Preview' : 'Generate & Preview'}</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={isProcessing}
-                  onClick={() => {
-                    if (ttsAudioData) {
-                      onAddAudioCue({
-                        id: 'snd_' + Math.random().toString(36).substring(2, 9),
-                        frame: currentFrame,
-                        filename: `TTS: ${ttsText.trim().slice(0, 24)}`,
-                        audioData: ttsAudioData,
-                        isCustomAudio: true,
-                        waitForFinish: ttsWaitForFinish,
-                        ttsVoice,
-                        ttsPitch,
-                        ttsSpeed,
-                      });
-                      onClose();
-                    } else {
-                      void handleGenerateTts(true);
-                    }
-                  }}
-                  className="flex-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 border-2 border-emerald-300 text-white font-bold px-3 py-1.5"
-                >
-                  + Add Voice @ Frame {currentFrame}
-                </button>
-              </div>
-            </div>
-          ) : tab === 'record' ? (
+          {tab === 'record' ? (
             <div className="flex flex-col gap-3 py-1">
               <div className="studio-well p-2.5 text-purple-200 leading-relaxed">
                 Record your own voice line with your microphone (up to {MAX_RECORD_SECONDS}s). It is encoded as authentic 22kHz 8-bit 3DMM audio and packed into your saved <code className="text-amber-300">.3mm</code> movie!

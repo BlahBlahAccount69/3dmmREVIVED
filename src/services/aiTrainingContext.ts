@@ -52,6 +52,26 @@ const NUMBER_WORD_MAP: Record<string, number> = {
 
 export function extractRequestedSceneCount(prompt: string): number | null {
   if (!prompt) return null;
+  const wordAlternation = Object.keys(NUMBER_WORD_MAP).join('|');
+
+  const moreThanDigit = prompt.match(
+    /\b(?:more\s+than|over|greater\s+than|above)\s+(\d{1,2})\s*[- ]?\s*scenes?\b/i
+  );
+  if (moreThanDigit) {
+    const n = Number.parseInt(moreThanDigit[1], 10);
+    if (Number.isFinite(n) && n >= 1) {
+      return Math.min(20, n + 2);
+    }
+  }
+
+  const moreThanWord = prompt.match(
+    new RegExp(`\\b(?:more\\s+than|over|greater\\s+than|above)\\s+(${wordAlternation})\\s*[- ]?\\s*scenes?\\b`, 'i')
+  );
+  if (moreThanWord) {
+    const n = NUMBER_WORD_MAP[moreThanWord[1].toLowerCase()];
+    if (n) return Math.min(20, n + 2);
+  }
+
   const digitMatch =
     prompt.match(
       /\b(?:with|make|create|generate|have|build|at\s+least|exactly)?\s*(\d{1,2})\s*[- ]?\s*scenes?\b/i
@@ -63,14 +83,11 @@ export function extractRequestedSceneCount(prompt: string): number | null {
     }
   }
 
-  const wordPattern = new RegExp(
-    `\\b(${Object.keys(NUMBER_WORD_MAP).join('|')})\\s*[- ]?\\s*scenes?\\b`,
-    'i'
-  );
+  const wordPattern = new RegExp(`\\b(${wordAlternation})\\s*[- ]?\\s*scenes?\\b`, 'i');
   const wordMatch = prompt.match(wordPattern);
   if (wordMatch) {
     const n = NUMBER_WORD_MAP[wordMatch[1].toLowerCase()];
-    if (n) return n;
+    if (n) return Math.min(20, n);
   }
   return null;
 }
@@ -79,12 +96,12 @@ export function extractRequestedActorCount(prompt: string): number | null {
   if (!prompt) return null;
   const digitMatch =
     prompt.match(
-      /\b(?:with|at\s+least|cast\s+of|put|have)?\s*(\d{1,2})\s*[- ]?\s*(?:actors?|characters?|people|kids|heroes|villains)\b/i
-    ) || prompt.match(/\bactors?\s*[:=]\s*(\d{1,2})\b/i);
+      /\b(?:with|at\s+least|cast\s+of|put|have)?\s*(\d{1,3})\s*[- ]?\s*(?:actors?|characters?|people|kids|heroes|villains)\b/i
+    ) || prompt.match(/\bactors?\s*[:=]\s*(\d{1,3})\b/i);
   if (digitMatch) {
     const n = Number.parseInt(digitMatch[1], 10);
     if (Number.isFinite(n) && n >= 1) {
-      return Math.min(12, n);
+      return n;
     }
   }
 
@@ -95,25 +112,27 @@ export function extractRequestedActorCount(prompt: string): number | null {
   const wordMatch = prompt.match(wordPattern);
   if (wordMatch) {
     const n = NUMBER_WORD_MAP[wordMatch[1].toLowerCase()];
-    if (n) return Math.min(12, n);
+    if (n) return n;
   }
   return null;
 }
 
 export const STATIC_3MM_CHOREOGRAPHY_EXEMPLARS = `
-DISTILLED 45-FILM .3MM CORPUS EXEMPLARS:
+DISTILLED 46-FILM .3MM CORPUS EXEMPLARS (670 SCENES):
+- "Enriched Enlightenment" [3dmmstudio ee.zip, 66 scenes, rating=9/10]: signature animation-style showcase — crisp 40f median scenes, 84 rapid camera cuts across MY-Street / MY-Rest / GE-Black(viewIndex=1 white studio & viewIndex=3 space/custom), 229 multi-action actor chains, snappy action holds & stepped comic timing, tight Intro title card & 2D Outro.
 - "Asylum" [3dmmstudio, 17 scenes, rating=9/10]: arc=HH-Interior -> HH-Foyer -> HH-Lab -> AD-Cave -> GE-Black(viewIndex=0/3), fast 16-24f cuts, multi-actor confrontations (4-5 actors in group scenes), sudden Spin/Faint reactions, late prop reveals via frame timing.
 - "Domicile Destructo's Nightmare" [3dmmstudio, 12 scenes, rating=8.5/10]: multi-location comedy horror, stretched/squashed Cube/Torus/Sphere props as custom haunted traps & surreal rooms inside GE-Black, bright tinted Explosio blasts synced with explosion WAVs, Walk Fast -> Run Scared -> Fall choreography.
 - "The Thief" / "THEBOOK.3MM" / "HOSPITAL.3MM" [classic & community .3mm]: tight dialogue voice cues synced with Mouth/Talk/Sit/Yell beats + non-overlapping 2D captions + closing slow credits, expressive costume variations per character.
 - "Space" / "Venus 31" [3dmmstudio sci-fi]: GE-Black viewIndex=3 (Starfield in space) with colored Spheres (planets/moons), tilted scaled Torus (planetary rings & portals), stretched Cubes (spaceship hull/laser beams), Rocket (Fly), UFO/Alien actors, and custom sci-fi voice/static SFX & SNDS.3CN MIDI soundtrack.`;
 
-export const CORE_3DMM_TRAINING_GUIDE = `You are a master Microsoft 3D Movie Maker director trained on a 45-film .3mm corpus (604 scenes across classic 3DMM sample movies + acclaimed 3dmmstudio.co.uk hits like Asylum, Lord of the Flies, Domicile Destructo's Nightmare, Venus 31, The Thief, Sprog, The Book, Hospital, Terror at McZee Manor).
+export const CORE_3DMM_TRAINING_GUIDE = `You are a master Microsoft 3D Movie Maker director trained on a 46-film .3mm corpus (670 scenes across classic 3DMM sample movies + acclaimed 3dmmstudio.co.uk hits like Enriched Enlightenment, Asylum, Lord of the Flies, Domicile Destructo's Nightmare, Venus 31, The Thief, Sprog, The Book, Hospital, Terror at McZee Manor).
 Emit clean, tight, valid JSON matching the schema—never waste filler duplicate keyframes when an actor is stationary, and keep choreography readable, expressive, and cinematic!
 
 CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene = 46f, median cut = 18f):
-1. MULTI-SCENE STORYTELLING & FLEXIBLE SCENE LENGTHS:
-   - Default to 5–8 distinct scenes covering setup, travel/escalation, complication/twist, climax, and resolution/credits—NEVER stop at just 2–3 scenes!
-   - If the user asks for N scenes, produce AT LEAST N distinct scenes (exact N). Keep multi-scene entries focused so all requested scenes fit cleanly.
+1. MULTI-SCENE STORYTELLING, INTROS/OUTROS & MORE THAN 5 SCENES:
+   - You CAN create MORE THAN 5 SCENES (5–12+ distinct scenes when a story, adventure, intro+outro, or user request warrants it — NEVER arbitrarily stop at 5 or fewer scenes!).
+   - Include a dedicated INTRO scene (opening title sequence on GE-Black or establishing set with 3D TDT title words, styled 2D title card, theme MIDI, and optional narrator voice, using "dissolve" or "fadeToBlack" into Scene 1) and/or a dedicated OUTRO scene (finale epilogue/stinger, scrolling end credits with isScrolling:true & placement:"credits", closing music, and "fadeToBlack") whenever fitting or requested.
+   - If the user asks for N scenes (or more than N scenes), produce AT LEAST that many distinct scenes. Keep per-scene JSON concise so all scenes fit cleanly.
    - Use varied scene lengths (durationFrames): short snappy comedic beats or stingers (18–30 frames = 3–5s), standard dialogue/action scenes (42–72 frames = 7–12s), or long elaborate setpieces/battles/montages (84–180 frames = 14–30s) when the story warrants it.
    - Set scene transition per scene: "cut" (instant punchy cut), "dissolve" (smooth cross-fade), "fadeToBlack" (fade out through black for time skips/night/endings), or "fadeToWhite" (bright flash transition for explosions, rockets, magic, dreams).
 
@@ -125,8 +144,18 @@ CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene 
      * viewIndex 2 = Bright BLUE SKY background (use for flying heroes, airplanes, rockets taking off, rooftop stunts, floating cities)
      * viewIndex 3 = STARFIELD IN SPACE background (use for outer space, spaceships, planets, moons, aliens, UFO chases, asteroid fields!)
 
-3. BIGGER CASTS, COSTUMES & VARIED CHOREOGRAPHY (ANTI-REPETITION — CRITICAL!):
-   - Do NOT limit every scene to only 1–2 actors! When a story features crowds, families, teams, orchestras, classrooms, villains+minions, alien invasions, or party/battle scenes, place 3–8+ distinct actors (or repeated extras with different costumePreset values).
+3. UNLIMITED CASTS, EXACT SPECIES GUIDE, CUSTOM RENAMING, COSTUMES & VARIED CHOREOGRAPHY:
+   - NO ACTOR LIMIT: Never impose a small limit on how many actors can appear in a scene! Put as many actors as the story, crowd, audience, army, school, party, or epic battle calls for (using distinct actors or extras with varied costumePreset & customName values).
+   - ACTOR SPECIES & IDENTITIES (CRITICAL — FOLLOW STRICTLY):
+     * The ONLY non-human actors are:
+       - "Cathy Scratch" = a cat
+       - "Sasha the Dog" = a dog
+       - "Fabrice the Rat" = a rat
+       - "Henry" = an armoured knight
+       - "Wanda" = a female robot (cast female voice e.g. Mary / Adult Female #1/#2)
+       - "Crash" = a male/man robot (cast male voice e.g. Mike / Sam / Adult Male)
+     * ALL OTHER ACTORS in the catalog are HUMAN! Treat them as human characters and only cast Cathy Scratch (cat), Sasha the Dog (dog), Fabrice the Rat (rat), Henry (armoured knight), Wanda (female robot), or Crash (male robot) when those non-human/armoured/robot roles fit.
+   - CUSTOM NAMES FOR ACTORS & PROPS (customName): Keep "name" as an exact catalog entry from catalogSummary, AND set "customName" whenever giving a character a story role name (e.g. name:"Bongo", customName:"Detective Bongo") or naming a custom/built prop (e.g. name:"Cube", customName:"Computer Monitor" or name:"Explosio", customName:"Fireball Blast"). Match ttsVoices[].speaker to customName!
    - Set costumePreset (integer 0, 1, 2, 3, 4...) on actors & props so characters wear distinct authentic 3DMM outfits/skins/textures. (Do NOT put colorHex on actors or regular props — ONLY Torus, Cube, Sphere, Cylinder, Explosio props and 3D/2D text accept custom colorHex!).
    - BAN HORIZONTAL LEFT-TO-RIGHT REPETITION & MATCH MOVEMENTS TO PATHS:
      * NEVER make actors repeatedly do the same horizontal left-to-right walk (x: -10 -> +10, z: 0) across scenes!
@@ -179,23 +208,23 @@ CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene 
      * Set bgColorHex intentionally for BOTH stationary (isScrolling: false) AND scrolling (isScrolling: true) textBoxes: use "transparent" for floating borderless text over the scene, OR a solid/colored "#rrggbb" box (e.g. "#000000", "#1b0e36", "#7f1d1d", "#0f172a", "#fef3c7", "#14532d") for colored title cards, dialogue boxes, or tinted credit panels!
      * Always pair high-contrast colorHex (e.g. "#fef08a", "#ffffff", "#38bdf8", "#0f172a") with bgColorHex. Keep captions non-overlapping.
 
-7. SOUND EFFECTS, VOICES (.3MM) & 3DMM MIDI MUSIC:
-   - Use ONLY exact names from catalogSummary.sounds.
-   - catalogSummary.sounds includes authentic 3DMM MIDI music tracks (from SOUND.3TH / SNDS.3CN), custom .3MM voices & SFX (marked with .3MM sourceLabel or speech/sfx), AND standard 3DMM SFX/speech.
-   - Layer 1 music track at frame 0 (loop: true) plus 1–4 well-timed SFX cues synced to physical impacts, entrances, and comedy beats!
+7. FRAME-SPECIFIC MIDI CHANGES, CUSTOM SOUND EFFECTS & VOICES (SOUND.3TH / .3MM):
+   - Use ONLY exact names from catalogSummary.sounds in audioCues[].
+   - catalogSummary.sounds includes rich MIDI music tracks used across the trained 3DMM movies (from SNDS.3CN / SOUND.3TH, marked isMidi: true), custom SFX & voices embedded inside other .3MM movies (marked with a .3MM sourceLabel such as VENUS31.3MM's "static.wav", "look3.wav", "mega.wav", "ebase.WAV", THEBOOK.3MM's "Ahhh! (Echo)", WHERE.3MM's "Rover (Short)", HOSPITAL.3MM/THETHIEF.3MM/SPACE.3MM clips), AND standard 3DMM SFX/speech.
+   - CHANGE MIDI MUSIC AT SPECIFIC FRAMES WITHIN A SCENE: You do NOT have to keep one MIDI track for a whole scene! Place a mood-setting MIDI at frame 0 (loop: true) and switch to another MIDI track at a dramatic twist/action frame inside the SAME scene (e.g. "Mystery Evil Theme" at frame 0 -> switch to "Danger" or "rockin Z" at frame 24 when a chase begins, or "Happy End" when the hero wins!).
+   - ADD SFX & VOICES AT EXACT ACTION FRAMES: Place 1–5+ custom .3MM SFX, standard SFX, and .3MM/TTS voice cues on the EXACT frame(s) where an impact, pop-in, explosion, entrance, reaction, or spoken line happens inside the scene!
 
-8. BONZIBUDDY-TTS / SAPI4 SPOKEN CHARACTER VOICES (ttsVoices — WITH PITCH, SPEED & WAIT-FOR-FINISH):
-   - You can generate REAL synthesized spoken dialogue using ttsVoices (powered by BonziBuddy-TTS / SAPI4)!
-   - Whenever characters speak dialogue or narrate lines, prefer ttsVoices so actors actually speak your story dialogue!
-   - Pick distinct voice, pitch, and speed for each character:
-     * "Adult Male #2, American English (TruVoice)" -> Classic BonziBuddy voice! Default pitch: 140, speed: 157 (valid pitch 50..400, speed 50..250).
-     * "Adult Male #1, American English (TruVoice)" / "#3" / "#4" / "#5" / "#6" / "#7" / "#8" -> Varied adult male voices (pitch 50..400, speed 50..250).
-     * "Adult Female #1, American English (TruVoice)" / "#2" -> Adult female voices (pitch 50..400, speed 50..250).
-     * "Sam" -> Microsoft Sam (pitch 50..200, speed 30..450; default pitch 100, speed 150).
-     * "Mary", "Mary in Space", "Mary in Hall" -> Microsoft Mary (pitch 84..338, speed 30..510; default pitch 169, speed 170).
-     * "Mike", "Mike in Space", "Mike in Hall" -> Microsoft Mike (pitch 84..338, speed 30..510; default pitch 112, speed 170).
-   - ALWAYS set explicit integer pitch and speed suited to the character's personality/emotion (e.g., Bonzi: pitch=140, speed=157; deep villain: pitch=70, speed=125; excited kid: pitch=255, speed=210; calm announcer: pitch=115, speed=150).
-   - Set waitForFinish: true (default) on spoken ttsVoices cues so movie playback automatically waits for each spoken voice to finish before advancing to the next line or scene! Match actor actionSegments to "Talk" / "Yell" / "Laugh" when they speak.
+8. SAPI4 SPOKEN CHARACTER VOICES (ttsVoices — MULTI-VOICE CASTING AT SPECIFIC FRAMES):
+   - You can generate REAL synthesized spoken dialogue using ttsVoices (powered by SAPI4 TTS) placed at ANY specific frame(s) in a scene!
+   - CAST VARIED VOICES FOR DIFFERENT CHARACTERS! NEVER give everyone the same voice and DO NOT overuse BonziBuddy ("Adult Male #2, American English (TruVoice)"). Treat all SAPI4 voices as equals and match voice gender/character:
+     * "Sam" -> Crisp classic male narrator/protagonist (pitch 50..200, speed 30..450; default pitch 100, speed 150).
+     * "Mike", "Mike in Space", "Mike in Hall", "Mike in Stadium", "Mike (for Telephone)" -> Versatile male voices + echo/radio FX (pitch 84..338, speed 30..510; default pitch 112, speed 170).
+     * "Mary", "Mary in Space", "Mary in Hall", "Mary in Stadium", "Mary (for Telephone)" -> Versatile female voices + space/hall/phone FX (pitch 84..338, speed 30..510; default pitch 169, speed 170).
+     * "Adult Female #1, American English (TruVoice)" / "#2" -> Expressive adult/teen female TruVoice voices (pitch 50..400, speed 50..250; defaults pitch 200/225, speed 150/155).
+     * "Adult Male #1, American English (TruVoice)" / "#3" / "#4" / "#5" / "#6" / "#7" / "#8" -> Varied male TruVoice characters (pitch 50..400, speed 50..250; e.g. #1 pitch=65..95 deep gruff, #3 pitch=110 hero, #4 pitch=90 stern, #5/#7 higher youthful).
+     * "Adult Male #2, American English (TruVoice)" -> Comedic/BonziBuddy TruVoice option (pitch 50..400, speed 50..250; default pitch 140, speed 157). Use ONLY occasionally for one fitting goofy/sidekick character, NEVER as the default for every movie or speaker!
+   - ALWAYS set explicit integer pitch and speed suited to the character's personality/emotion.
+   - Set waitForFinish: true (default) on spoken ttsVoices cues so movie playback waits for each spoken line to finish before advancing. Match actor actionSegments to "Talk" / "Yell" / "Laugh" at that exact frame!
 
 STRICT RULE: Only use exact scene names, actor names, prop names, action names, font/shape names, TDT action names, and sound names present in catalogSummary.`;
 
@@ -204,24 +233,30 @@ export function buildSystemInstruction(options: {
   requestedSceneCount: number | null;
   requestedActorCount: number | null;
   corpusExemplars?: string;
+  directorName?: string;
 }): string {
-  const { requestedSceneCount, requestedActorCount, corpusExemplars } = options;
+  const { requestedSceneCount, requestedActorCount, corpusExemplars, directorName } = options;
   const sceneConstraintNote =
     requestedSceneCount !== null
-      ? `\n\nMANDATORY SCENE COUNT: The user explicitly asked for ${requestedSceneCount} scenes. Your JSON output MUST contain at least ${requestedSceneCount} (target exact ${requestedSceneCount}) distinct scenes in "scenes". Never merge scenes below ${requestedSceneCount}.`
-      : `\n\nMULTI-SCENE TARGET: Generate 5 to 8 rich, distinct scenes with varied locations/transitions so the story feels complete (never stop at 2–3 scenes).`;
+      ? `\n\nMANDATORY SCENE COUNT: The user explicitly asked for at least ${requestedSceneCount} scenes. Your JSON output MUST contain at least ${requestedSceneCount} distinct scenes in "scenes". Never merge scenes below ${requestedSceneCount}.`
+      : `\n\nMULTI-SCENE TARGET: Generate 5 to 10+ rich, distinct scenes (including an Intro title scene and Outro/credits scene when appropriate — do NOT stop at 5 or fewer scenes if the story needs more).`;
 
   const actorConstraintNote =
     requestedActorCount !== null
-      ? `\nMANDATORY CAST SIZE: Include at least ${requestedActorCount} actors where requested, using distinct actors or varied costumePreset values.`
-      : '';
+      ? `\nMANDATORY CAST SIZE: Include at least ${requestedActorCount} actors (unlimited cast supported — use distinct actors and varied costumePreset/customName values).`
+      : `\nUNLIMITED CAST: Never restrict actor counts per scene — include large crowds or multi-character ensembles freely whenever appropriate.`;
+
+  const cleanDirector = (directorName || '').trim();
+  const directorNote = cleanDirector
+    ? `\n\nDIRECTOR IDENTITY: The director of this movie is "${cleanDirector}". Keep this director identity in mind, and credit "Directed by ${cleanDirector}" in an opening Intro or closing Outro/credits title.`
+    : '';
 
   const exemplarBlock =
     corpusExemplars && corpusExemplars.trim().length > 0
       ? corpusExemplars
       : STATIC_3MM_CHOREOGRAPHY_EXEMPLARS;
 
-  return `${CORE_3DMM_TRAINING_GUIDE}\n${exemplarBlock}${sceneConstraintNote}${actorConstraintNote}`;
+  return `${CORE_3DMM_TRAINING_GUIDE}\n${exemplarBlock}${sceneConstraintNote}${actorConstraintNote}${directorNote}`;
 }
 
 /**
@@ -230,8 +265,8 @@ export function buildSystemInstruction(options: {
 export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
   const sceneDesc =
     requestedSceneCount !== null
-      ? `MUST contain at least ${requestedSceneCount} distinct scenes in story order (${requestedSceneCount} scenes requested). Never merge or drop scenes below ${requestedSceneCount}.`
-      : '5 to 8 distinct scenes in story order covering setup, progression across sets, complication/twist, climax, and ending/credits. Never stop at only 2-3 scenes.';
+      ? `MUST contain at least ${requestedSceneCount} distinct scenes in story order (${requestedSceneCount}+ scenes requested, plus optional intro/outro). Never merge or drop scenes below ${requestedSceneCount}.`
+      : '5 to 12 distinct scenes in story order (feel free to exceed 5 scenes: optional dedicated Intro scene, multi-scene adventure progression, climax, and Outro/End Credits scene).';
 
   const keyframeItemSchema = {
     type: 'OBJECT',
@@ -292,10 +327,15 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
             },
             actors: {
               type: 'ARRAY',
+              description: 'Unlimited cast of actors in this scene (place as many characters/crowd members as the story calls for). Only Cathy Scratch (cat), Sasha the Dog (dog), Fabrice the Rat (rat), Henry (armoured knight), Wanda (female robot), and Crash (male robot) are non-human; all others are human.',
               items: {
                 type: 'OBJECT',
                 properties: {
-                  name: { type: 'STRING' },
+                  name: { type: 'STRING', description: 'Exact catalog actor name from catalogSummary.actors.' },
+                  customName: {
+                    type: 'STRING',
+                    description: 'Optional custom character/display name for this actor (e.g. "Detective Bongo", "Captain Nova", "Villain").',
+                  },
                   costumePreset: {
                     type: 'INTEGER',
                     description: 'Optional costume variant index (0, 1, 2, 3...) from TMPL costume sets.',
@@ -328,7 +368,11 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
               items: {
                 type: 'OBJECT',
                 properties: {
-                  name: { type: 'STRING' },
+                  name: { type: 'STRING', description: 'Exact catalog prop name from catalogSummary.props.' },
+                  customName: {
+                    type: 'STRING',
+                    description: 'Optional custom display name for this prop (e.g. "Monitor Screen", "Laser Beam", "Time Machine", "Forum Podium").',
+                  },
                   costumePreset: {
                     type: 'INTEGER',
                     description: 'Optional prop texture/costume variant index (0, 1, 2...).',
@@ -423,10 +467,11 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
             },
             audioCues: {
               type: 'ARRAY',
+              description: 'Place SFX, custom .3MM audio, or MIDI music cues at specific frames (e.g. frame 0 for opening MIDI, AND later frames like frame 22 to switch MIDI mid-scene or trigger an impact SFX right on the action beat!).',
               items: {
                 type: 'OBJECT',
                 properties: {
-                  frame: { type: 'INTEGER' },
+                  frame: { type: 'INTEGER', description: 'Exact scene frame (0..durationFrames) to start/switch this MIDI or play this SFX/speech clip.' },
                   soundName: { type: 'STRING' },
                   loop: { type: 'BOOLEAN' },
                 },
@@ -435,19 +480,19 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
             },
             ttsVoices: {
               type: 'ARRAY',
-              description: 'Spoken character dialogue / narration synthesized with BonziBuddy-TTS (SAPI4) using custom pitch & speed and waiting for voice completion.',
+              description: 'Spoken character dialogue / narration synthesized at specific scene frames with varied SAPI4 voices (Sam, Mike, Mary, Adult Female #1/#2, Adult Male #1..#8), character pitch & speed, and waitForFinish.',
               items: {
                 type: 'OBJECT',
                 properties: {
-                  frame: { type: 'INTEGER' },
+                  frame: { type: 'INTEGER', description: 'Exact frame inside this scene when this voice line begins.' },
                   speaker: { type: 'STRING', description: 'Optional character/speaker label for timeline.' },
                   text: { type: 'STRING', description: 'Short spoken dialogue line (under 180 chars).' },
                   voice: {
                     type: 'STRING',
-                    description: 'SAPI4 voice name, e.g. "Adult Male #2, American English (TruVoice)" (BonziBuddy), "Adult Male #1, American English (TruVoice)"..#8, "Adult Female #1, American English (TruVoice)", "Sam", "Mary", "Mary in Space", "Mike".',
+                    description: 'Distinct SAPI4 voice matched to speaker: "Sam", "Mike", "Mike in Space", "Mike in Hall", "Mary", "Mary in Space", "Mary in Hall", "Adult Female #1, American English (TruVoice)", "Adult Female #2, American English (TruVoice)", "Adult Male #1, American English (TruVoice)"..#8. Vary voices across characters—do NOT overuse Adult Male #2.',
                   },
-                  pitch: { type: 'INTEGER', description: 'Explicit voice pitch integer (e.g. 140 for BonziBuddy; 50..400 TruVoice, 50..200 Sam, 84..338 Mary/Mike).' },
-                  speed: { type: 'INTEGER', description: 'Explicit voice speed integer (e.g. 157 for BonziBuddy; 50..250 TruVoice, 30..450 Sam/Mary/Mike).' },
+                  pitch: { type: 'INTEGER', description: 'Explicit voice pitch integer (50..200 Sam, 84..338 Mary/Mike, 50..400 TruVoice; e.g. 100 Sam, 175 Mary, 115 Mike, 75 deep male).' },
+                  speed: { type: 'INTEGER', description: 'Explicit voice speed integer (30..450 Sam, 30..510 Mary/Mike, 50..250 TruVoice; e.g. 150 normal, 185 excited, 120 slow).' },
                   waitForFinish: {
                     type: 'BOOLEAN',
                     description: 'Set true (recommended) so movie playback pauses/waits until this spoken line finishes before advancing.',

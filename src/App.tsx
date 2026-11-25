@@ -29,6 +29,10 @@ import { exportMovieTo3mmBytes } from './services/movie3mmWriter';
 import { CatalogSoundItem, sound3DMM } from './services/soundLibrary';
 import { generateAiMovie } from './services/aiMovieGenerator';
 import {
+  loadWatchedMovieFromStorage,
+  saveWatchedMovieToStorage,
+} from './services/watchedMovieStorage';
+import {
   LivePlayheadState,
   resolveActiveCameraAtFrame,
   resolveInterpolatedKeyframe,
@@ -45,7 +49,8 @@ import { assetUrl } from './utils/assetUrl';
 import { BookOpen, FilePlus, Film, FolderOpen, Save, Settings, Sparkles, X } from 'lucide-react';
 
 export default function App() {
-  const [movie, setMovie] = useState<Movie>(createDefaultMovie);
+  const [restoredWatchedMovie] = useState<Movie | null>(() => loadWatchedMovieFromStorage());
+  const [movie, setMovie] = useState<Movie>(() => restoredWatchedMovie ?? createDefaultMovie());
   const [catalog, setCatalog] = useState<ThreeDmmCatalog>({
     actors: [],
     props: [],
@@ -56,10 +61,27 @@ export default function App() {
   const [renderFrame, setRenderFrame] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  const [selectedEntityId, setSelectedEntityId] = useState<string | null>('actor_bongo_1');
+  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(() => {
+    if (restoredWatchedMovie) {
+      const s0 = restoredWatchedMovie.scenes[0];
+      const first = s0?.actors[0] || s0?.props[0] || s0?.tdtTexts?.[0] || s0?.textBoxes?.[0];
+      return first?.id || null;
+    }
+    return 'actor_bongo_1';
+  });
   const [selectedEntityType, setSelectedEntityType] = useState<
     'actor' | 'prop' | 'tdt' | 'tbox' | null
-  >('actor');
+  >(() => {
+    if (restoredWatchedMovie) {
+      const s0 = restoredWatchedMovie.scenes[0];
+      if (s0?.actors[0]) return 'actor';
+      if (s0?.props[0]) return 'prop';
+      if (s0?.tdtTexts?.[0]) return 'tdt';
+      if (s0?.textBoxes?.[0]) return 'tbox';
+      return null;
+    }
+    return 'actor';
+  });
 
   const [moveUpDownMode, setMoveUpDownMode] = useState(false);
   const [rotateMode, setRotateMode] = useState(false);
@@ -108,6 +130,7 @@ export default function App() {
 
   const movieRef = useRef(movie);
   movieRef.current = movie;
+  const isWatchedMovieActiveRef = useRef<boolean>(Boolean(restoredWatchedMovie));
   const playheadRef = useRef<LivePlayheadState>({
     sceneIndex: currentSceneIndex,
     frame: currentFrame,
@@ -123,6 +146,29 @@ export default function App() {
     playheadRef.current.scrollHoldActive = false;
     playheadRef.current.scrollElapsedSec = 0;
   }
+
+  // Persist edits to the currently watched/restored movie and flush on tab hide/unload
+  useEffect(() => {
+    if (!isWatchedMovieActiveRef.current || movie.scenes.length === 0) return;
+    const timer = window.setTimeout(() => {
+      saveWatchedMovieToStorage(movie);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [movie]);
+
+  useEffect(() => {
+    const flushWatched = () => {
+      if ((isWatchedMovieActiveRef.current || isPlaying) && movieRef.current.scenes.length > 0) {
+        saveWatchedMovieToStorage(movieRef.current);
+      }
+    };
+    window.addEventListener('pagehide', flushWatched);
+    window.addEventListener('beforeunload', flushWatched);
+    return () => {
+      window.removeEventListener('pagehide', flushWatched);
+      window.removeEventListener('beforeunload', flushWatched);
+    };
+  }, [isPlaying]);
 
   // Load real 3DMM Catalog & preload scenes, views, templates, sound catalog, UI WAVs, and MS GS Wavetable SoundFont
   useEffect(() => {
@@ -147,7 +193,9 @@ export default function App() {
         );
         void preloadThreeDmmAssets(cat).then(() => {
           setStatusMessage(
-            `Ready — Preloaded ${cat.scenes.length} Scenes (${cat.scenes.reduce((n, s) => n + s.views.length, 0)} Views), ${cat.actors.length} Actors & ${cat.props.length} Props.`
+            restoredWatchedMovie
+              ? `Restored watched movie "${movieRef.current.title}" (${movieRef.current.scenes.length} scene${movieRef.current.scenes.length === 1 ? '' : 's'}) — Ready.`
+              : `Ready — Preloaded ${cat.scenes.length} Scenes (${cat.scenes.reduce((n, s) => n + s.views.length, 0)} Views), ${cat.actors.length} Actors & ${cat.props.length} Props.`
           );
         });
       })
@@ -365,6 +413,7 @@ export default function App() {
             setCurrentFrame(endFrame);
             setRenderFrame(endFrame);
             setIsPlaying(false);
+            saveWatchedMovieToStorage(movieRef.current);
             return;
           }
         }
@@ -380,12 +429,19 @@ export default function App() {
           setStatusMessage(
             `Playing Scene ${nextSceneIndex + 1}/${scenes.length}: ${scenes[nextSceneIndex].sceneName}`
           );
+          saveWatchedMovieToStorage(movieRef.current);
         }
 
         if (nextIntFrame !== intFrame || nextSceneIndex !== sceneIndex) {
           setCurrentFrame(nextIntFrame);
           setRenderFrame(nextIntFrame);
-          triggerAudiosForFrame(scenes[nextSceneIndex], nextIntFrame);
+          if (nextSceneIndex !== sceneIndex) {
+            triggerAudiosForFrame(scenes[nextSceneIndex], nextIntFrame);
+          } else {
+            for (let fStep = intFrame + 1; fStep <= nextIntFrame; fStep++) {
+              triggerAudiosForFrame(scenes[nextSceneIndex], fStep);
+            }
+          }
         }
       }
 
@@ -418,9 +474,12 @@ export default function App() {
       setIsPlaying(false);
       setCurrentFrame(stoppedFrame);
       setRenderFrame(stoppedFrame);
+      saveWatchedMovieToStorage(movieRef.current);
       return;
     }
     setIsRecordingMovement(false);
+    isWatchedMovieActiveRef.current = true;
+    saveWatchedMovieToStorage(movie);
     const atVeryEnd =
       currentSceneIndex >= movie.scenes.length - 1 &&
       currentFrame >= (currentScene?.totalFrames ?? 0);
@@ -445,8 +504,8 @@ export default function App() {
       scrollElapsedSec: 0,
       completedScrollIds: {},
     };
-    if (startFrame === 0 && startScene) {
-      triggerAudiosForFrame(startScene, 0);
+    if (startScene) {
+      triggerAudiosForFrame(startScene, startFrame);
     }
     setIsPlaying(true);
   };
@@ -480,6 +539,7 @@ export default function App() {
     setIsAudioModalOpen(false);
     setMoveUpDownMode(false);
     setRotateMode(false);
+    isWatchedMovieActiveRef.current = false;
     setMovie({
       title: 'Untitled Movie',
       scenes: [],
@@ -1193,6 +1253,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [currentScene, selectedEntityId, selectedEntityType, currentFrame]);
 
+  const handleUpdateEntityName = (
+    id: string,
+    type: 'actor' | 'prop',
+    name: string
+  ) => {
+    if (!currentScene) return;
+    const clean = name.slice(0, 48);
+    const updated = [...movie.scenes];
+    if (type === 'actor') {
+      updated[currentSceneIndex] = {
+        ...currentScene,
+        actors: currentScene.actors.map((a) => (a.id === id ? { ...a, name: clean } : a)),
+      };
+    } else {
+      updated[currentSceneIndex] = {
+        ...currentScene,
+        props: currentScene.props.map((p) => (p.id === id ? { ...p, name: clean } : p)),
+      };
+    }
+    setMovie({ ...movie, scenes: updated });
+  };
+
   const handleUpdateEntityColor = (
     id: string,
     type: StageEntityType,
@@ -1202,7 +1284,12 @@ export default function App() {
     if (type === 'actor') return;
     if (type === 'prop') {
       const targetProp = currentScene.props.find((p) => p.id === id);
-      if (!targetProp || !isColorablePrimitiveProp(targetProp.name)) return;
+      if (
+        !targetProp ||
+        !isColorablePrimitiveProp(targetProp.name, targetProp.tmplCno, catalog.props)
+      ) {
+        return;
+      }
     }
     const updated = [...movie.scenes];
     const patchColor = (kfs: Record<number, KeyframePosition>) => {
@@ -1576,6 +1663,7 @@ export default function App() {
       const ab = await file.arrayBuffer();
       const loaded = await loadOfficial3mmMovie(ab, file.name);
       void sound3DMM.playUiWav('FNEW.WAV');
+      isWatchedMovieActiveRef.current = false;
       setMovie(loaded);
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
@@ -1610,6 +1698,7 @@ export default function App() {
     try {
       const loaded = await loadOfficial3mmMovie(assetUrl(`3dmm/samples/${sampleFile}`), label);
       void sound3DMM.playUiWav('FNEW.WAV');
+      isWatchedMovieActiveRef.current = false;
       setMovie(loaded);
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
@@ -1649,6 +1738,7 @@ export default function App() {
       });
       sound3DMM.stopAll();
       setIsPlaying(false);
+      isWatchedMovieActiveRef.current = false;
       setMovie(generated);
       setCurrentSceneIndex(0);
       setCurrentFrame(0);
@@ -1989,6 +2079,7 @@ export default function App() {
                 onUpdatePropAction={handleUpdatePropAction}
                 onUpdatePropCostume={handleUpdatePropCostume}
                 onUpdateTdtAction={handleUpdateTdtAction}
+                onUpdateEntityName={handleUpdateEntityName}
                 onUpdateEntityColor={handleUpdateEntityColor}
                 onUpdateEntityRotation={handleUpdateEntityRotation}
                 onUpdateEntityScale={handleUpdateEntityScale}

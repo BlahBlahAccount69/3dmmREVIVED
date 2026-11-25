@@ -2,13 +2,14 @@
   "generatedAt": "2026-11-22T10:18:43.572Z",
   "sources": [
     "https://www.3dmmstudio.co.uk/listmovies.php?page=NEW (14 .3mm zip packs, 24 .3mm movies)",
-    "Microsoft 3D Movie Maker Official Sample Movies (21 .3mm movies)"
+    "Microsoft 3D Movie Maker Official Sample Movies (21 .3mm movies)",
+    "https://www.3dmmstudio.co.uk/movies/ee.zip (Enriched Enlightenment.3mm - 66 scenes)"
   ],
   "corpusStats": {
-    "totalMovies": 45,
-    "studioMoviesCount": 24,
+    "totalMovies": 46,
+    "studioMoviesCount": 25,
     "officialMoviesCount": 21,
-    "totalScenesAnalyzed": 604,
+    "totalScenesAnalyzed": 670,
     "medianSceneFrames": 46,
     "medianCutsPerScene": 1,
     "medianCutIntervalFrames": 18,
@@ -386,6 +387,611 @@
     ]
   },
   "movies": [
+    {
+      "id": "Enriched Enlightenment",
+      "title": "Enriched Enlightenment",
+      "source": "3dmmstudio",
+      "zip": "ee",
+      "rating": 9,
+      "review": "66-scene 3dmmstudio animation showcase (4311 frames, 84 camera cuts, 1236 cel-freeze holds, 229 multi-action chains) praised for expressive physical animation styles, crisp cut pacing (median 40f/scene), and GE-Black staging.",
+      "sceneCount": 66,
+      "totalFrames": 4311,
+      "cutsCount": 84,
+      "tdtCount": 28,
+      "textBoxCount": 44,
+      "hasScrollingCredits": true,
+      "tags": [
+        "enriched",
+        "enlightenment",
+        "animation",
+        "styles",
+        "cuts",
+        "comedy",
+        "action",
+        "freeze",
+        "multi-action",
+        "intro",
+        "outro"
+      ],
+      "highlights": [
+        {
+          "sceneName": "GE-Black",
+          "frames": 41,
+          "cuts": [
+            {
+              "f": 0,
+              "v": 3
+            }
+          ],
+          "actors": [],
+          "props": [
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            }
+          ],
+          "tdts": [],
+          "texts": [],
+          "audio": [
+            "f28:car tire squeal",
+            "f0:cypress2.wav",
+            "f0:car drive off"
+          ]
+        },
+        {
+          "sceneName": "GE-Black",
+          "frames": 118,
+          "cuts": [
+            {
+              "f": 0,
+              "v": 3
+            },
+            {
+              "f": 0,
+              "v": 1
+            }
+          ],
+          "actors": [],
+          "props": [
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 5"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            }
+          ],
+          "tdts": [],
+          "texts": [],
+          "audio": [
+            "f51:ting.wav",
+            "f0:truck idle loop",
+            "f6:Call.wav",
+            "f11:dsf",
+            "f56:gjhg",
+            "f100:fgfdg"
+          ]
+        },
+        {
+          "sceneName": "GE-Black",
+          "frames": 134,
+          "cuts": [
+            {
+              "f": 0,
+              "v": 1
+            }
+          ],
+          "actors": [
+            {
+              "name": "Gustave",
+              "actions": [
+                "121:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "Gustave",
+              "actions": [
+                "121:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "ring",
+              "actions": [
+                "111:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "Star",
+              "actions": [
+                "110:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "Enlightenment",
+              "actions": [
+                "87:Action 4"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            }
+          ],
+          "props": [
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            }
+          ],
+          "tdts": [],
+          "texts": [],
+          "audio": []
+        },
+        {
+          "sceneName": "MY-Street",
+          "frames": 112,
+          "cuts": [
+            {
+              "f": 0,
+              "v": 3
+            },
+            {
+              "f": 0,
+              "v": 1
+            },
+            {
+              "f": 0,
+              "v": 1
+            },
+            {
+              "f": 26,
+              "v": 3
+            },
+            {
+              "f": 38,
+              "v": 3
+            },
+            {
+              "f": 60,
+              "v": 3
+            }
+          ],
+          "actors": [
+            {
+              "name": "<~ Eclipse blocking research centre",
+              "actions": [
+                "73:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            }
+          ],
+          "props": [
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            }
+          ],
+          "tdts": [],
+          "texts": [],
+          "audio": [
+            "f105:357mag.wav",
+            "f105:fdgfd",
+            "f83:car start",
+            "f87:car rev peelout",
+            "f106:fall collapsed",
+            "f80:car door close"
+          ]
+        },
+        {
+          "sceneName": "MY-Rest",
+          "frames": 249,
+          "cuts": [
+            {
+              "f": 0,
+              "v": 3
+            },
+            {
+              "f": 0,
+              "v": 1
+            },
+            {
+              "f": 0,
+              "v": 1
+            },
+            {
+              "f": 6,
+              "v": 3
+            },
+            {
+              "f": 199,
+              "v": 3
+            },
+            {
+              "f": 239,
+              "v": 3
+            }
+          ],
+          "actors": [
+            {
+              "name": "5 minutes later...",
+              "actions": [
+                "0:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "kit",
+              "actions": [
+                "6:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "Disguise",
+              "actions": [
+                "6:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            }
+          ],
+          "props": [
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            }
+          ],
+          "tdts": [],
+          "texts": [
+            {
+              "text": "2D",
+              "scroll": false
+            }
+          ],
+          "audio": [
+            "f223:sdfd",
+            "f219:fgsdfg",
+            "f221:xcvxcv",
+            "f215:hfhjf",
+            "f217:cxvxcv",
+            "f200:bump"
+          ]
+        },
+        {
+          "sceneName": "GE-Black",
+          "frames": 46,
+          "cuts": [],
+          "actors": [
+            {
+              "name": "Enlightenment",
+              "actions": [
+                "14:Action 0",
+                "15:Action 0",
+                "16:Action 0",
+                "17:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "Control Booth ~>",
+              "actions": [
+                "0:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            }
+          ],
+          "props": [
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            }
+          ],
+          "tdts": [],
+          "texts": [],
+          "audio": [
+            "f36:fgfg",
+            "f39:fall collapsed",
+            "f13:chew2.wav",
+            "f13:chgfghdfg",
+            "f13:dfsdf",
+            "f36:punch slap"
+          ]
+        },
+        {
+          "sceneName": "GE-Black",
+          "frames": 366,
+          "cuts": [
+            {
+              "f": 0,
+              "v": 1
+            },
+            {
+              "f": 266,
+              "v": 1
+            }
+          ],
+          "actors": [
+            {
+              "name": "<---",
+              "actions": [
+                "0:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "to full height",
+              "actions": [
+                "0:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            },
+            {
+              "name": "lever to switch E.B. Utility",
+              "actions": [
+                "0:Action 0"
+              ],
+              "kfs": [
+                {
+                  "f": 0,
+                  "x": 0,
+                  "y": 0,
+                  "z": 0,
+                  "rotY": 0
+                }
+              ]
+            }
+          ],
+          "props": [
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            },
+            {
+              "name": "CustomProp",
+              "action": "Action 0"
+            }
+          ],
+          "tdts": [],
+          "texts": [],
+          "audio": [
+            "f275:czxc",
+            "f278:whumf",
+            "f278:fdv",
+            "f338:sdsd",
+            "f316:uyf",
+            "f323:dfgdf"
+          ]
+        },
+        {
+          "sceneName": "GE-Black",
+          "frames": 1,
+          "cuts": [],
+          "actors": [],
+          "props": [],
+          "tdts": [],
+          "texts": [
+            {
+              "text": "2D",
+              "scroll": true
+            },
+            {
+              "text": "2D",
+              "scroll": true
+            }
+          ],
+          "audio": []
+        }
+      ]
+    },
     {
       "id": "Who's the director 6",
       "title": "Who's the Director Anyway? 6",

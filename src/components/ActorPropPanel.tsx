@@ -50,6 +50,7 @@ interface ActorPropPanelProps {
   onUpdatePropAction: (id: string, action: PropAction, anid?: number) => void;
   onUpdatePropCostume: (id: string, costumeCmids: number[]) => void;
   onUpdateTdtAction: (id: string, action: TdtAction | string) => void;
+  onUpdateEntityName?: (id: string, type: 'actor' | 'prop', name: string) => void;
   onUpdateEntityColor: (id: string, type: 'actor' | 'prop' | 'tdt', color?: string) => void;
   onUpdateEntityRotation: (
     id: string,
@@ -132,8 +133,17 @@ const FONT_2D_OPTIONS = [
   'Century Gothic',
 ];
 
-export function isColorablePrimitiveProp(name?: string): boolean {
-  return /^(?:torus|sphere|cube|cylinder|explosio(?:n)?)\b/i.test((name || '').trim());
+export function isColorablePrimitiveProp(
+  name?: string,
+  tmplCno?: number,
+  catalogProps?: CatalogPropItem[]
+): boolean {
+  const re = /^(?:torus|sphere|cube|cylinder|explosio(?:n)?)\b/i;
+  if (tmplCno !== undefined && catalogProps && catalogProps.length > 0) {
+    const cat = catalogProps.find((p) => p.tmplCno === tmplCno);
+    if (cat && re.test(cat.name.trim())) return true;
+  }
+  return re.test((name || '').trim());
 }
 
 function wrapDeg(rad: number): number {
@@ -167,6 +177,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
   onUpdatePropAction,
   onUpdatePropCostume,
   onUpdateTdtAction,
+  onUpdateEntityName,
   onUpdateEntityColor,
   onUpdateEntityRotation,
   onUpdateEntityScale,
@@ -1144,16 +1155,33 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
       {/* Selected Actor / Prop / 3D Word / 2D Words Inspector */}
       {selectedActor && activeActorAction ? (
         <div className="studio-panel p-2.5 flex flex-col gap-2">
-          <div className="flex items-center justify-between pb-1 border-b border-purple-700/70">
-            <div className="flex items-center gap-1.5 font-bold text-amber-300">
+          <div className="flex items-center justify-between gap-2 pb-1 border-b border-purple-700/70">
+            <div className="flex items-center gap-1.5 font-bold text-amber-300 flex-1 min-w-0">
               <img
                 src={assetUrl('3dmm/bmp/2COST.BMP')}
                 alt=""
-                className="h-4 w-auto object-contain image-rendering-pixelated"
+                className="h-4 w-auto object-contain image-rendering-pixelated shrink-0"
               />
-              <span>Actor: {selectedActor.name}</span>
+              <span className="text-[11px] shrink-0">Actor:</span>
+              <input
+                type="text"
+                value={selectedActor.name}
+                maxLength={48}
+                aria-label="Actor name"
+                title="Rename actor"
+                onChange={(e) => onUpdateEntityName?.(selectedActor.id, 'actor', e.target.value)}
+                onBlur={(e) => {
+                  if (!e.target.value.trim()) {
+                    const fallback =
+                      catalogActors.find((a) => a.tmplCno === selectedActor.tmplCno)?.name ||
+                      'Actor';
+                    onUpdateEntityName?.(selectedActor.id, 'actor', fallback);
+                  }
+                }}
+                className="studio-well px-1.5 py-0.5 text-xs font-bold text-amber-200 w-full min-w-0 focus:outline-none focus:ring-1 focus:ring-amber-400"
+              />
             </div>
-            <span className="text-[10px] studio-well px-1.5 py-0.5 font-mono text-cyan-200">
+            <span className="text-[10px] studio-well px-1.5 py-0.5 font-mono text-cyan-200 shrink-0">
               {Object.keys(selectedActor.keyframes).length}f
             </span>
           </div>
@@ -1300,16 +1328,33 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
         </div>
       ) : selectedProp && activePropAction ? (
         <div className="studio-panel p-2.5 flex flex-col gap-2">
-          <div className="flex items-center justify-between pb-1 border-b border-amber-700/70">
-            <div className="flex items-center gap-1.5 font-bold text-amber-300">
+          <div className="flex items-center justify-between gap-2 pb-1 border-b border-amber-700/70">
+            <div className="flex items-center gap-1.5 font-bold text-amber-300 flex-1 min-w-0">
               <img
                 src={assetUrl('3dmm/bmp/2PROP.BMP')}
                 alt=""
-                className="h-4 w-auto object-contain image-rendering-pixelated"
+                className="h-4 w-auto object-contain image-rendering-pixelated shrink-0"
               />
-              <span>Prop: {selectedProp.name}</span>
+              <span className="text-[11px] shrink-0">Prop:</span>
+              <input
+                type="text"
+                value={selectedProp.name}
+                maxLength={48}
+                aria-label="Prop name"
+                title="Rename prop"
+                onChange={(e) => onUpdateEntityName?.(selectedProp.id, 'prop', e.target.value)}
+                onBlur={(e) => {
+                  if (!e.target.value.trim()) {
+                    const fallback =
+                      catalogProps.find((p) => p.tmplCno === selectedProp.tmplCno)?.name ||
+                      'Prop';
+                    onUpdateEntityName?.(selectedProp.id, 'prop', fallback);
+                  }
+                }}
+                className="studio-well px-1.5 py-0.5 text-xs font-bold text-amber-200 w-full min-w-0 focus:outline-none focus:ring-1 focus:ring-amber-400"
+              />
             </div>
-            <span className="text-[10px] studio-well px-1.5 py-0.5 font-mono text-amber-200">
+            <span className="text-[10px] studio-well px-1.5 py-0.5 font-mono text-amber-200 shrink-0">
               {Object.keys(selectedProp.keyframes).length}f
             </span>
           </div>
@@ -1419,7 +1464,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                             const updated = [...curList];
                             updated[ibset] = cmid;
                             onUpdatePropCostume(selectedProp.id, updated);
-                            if (isColorablePrimitiveProp(selectedProp.name)) {
+                            if (isColorablePrimitiveProp(selectedProp.name, selectedProp.tmplCno, catalogProps)) {
                               onUpdateEntityColor(selectedProp.id, 'prop', swatchHex);
                             }
                           }}
@@ -1428,7 +1473,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
                             isActive ? 'border-2 border-white scale-110' : 'border-black/70'
                           }`}
                           title={
-                            isColorablePrimitiveProp(selectedProp.name)
+                            isColorablePrimitiveProp(selectedProp.name, selectedProp.tmplCno, catalogProps)
                               ? `Costume #${cmid} (${swatchHex})`
                               : `Costume #${cmid}`
                           }
@@ -1442,7 +1487,7 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           )}
 
           {renderRotationControls(selectedProp.id, 'prop')}
-          {isColorablePrimitiveProp(selectedProp.name) &&
+          {isColorablePrimitiveProp(selectedProp.name, selectedProp.tmplCno, catalogProps) &&
             renderColorControls(selectedProp.id, 'prop')}
 
           {(() => {

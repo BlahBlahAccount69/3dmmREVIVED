@@ -57,8 +57,9 @@ interface TrainingMovieHighlight {
     kfs?: { f: number; x: number; y: number; z: number; rotY: number }[];
   }[];
   props?: { name: string; actions?: string[] }[];
-  tdt?: { text: string; action: string; x: number; y: number; z: number }[];
-  textBoxes?: { text: string; start: number; end: number; scroll?: boolean }[];
+  tdts?: { text: string; action: string; x: number; y: number; z: number }[];
+  texts?: { text: string; start: number; end: number; scroll?: boolean }[];
+  audio?: string[];
   sounds?: string[];
 }
 
@@ -175,17 +176,29 @@ function selectCompactTrainingExemplars(prompt: string, targetSceneCount: number
       .slice(0, 4)
       .map((p) => p.name)
       .join(', ');
-    const leadTdt = (lead?.tdt || [])
+    const leadTdt = (lead?.tdts || [])
       .slice(0, 2)
       .map((t) => `"${t.text}"(${t.action})`)
+      .join(', ');
+    const leadAudio = Array.from(
+      new Set(
+        hs.flatMap((h) => h.audio || h.sounds || [])
+          .map((raw) => {
+            const idx = raw.indexOf(':');
+            return (idx >= 0 ? raw.slice(idx + 1) : raw).trim();
+          })
+          .filter((name) => Boolean(name) && !/\.(mp3|mp4)/i.test(name))
+      )
+    )
+      .slice(0, 4)
       .join(', ');
     const reviewSnippet = (m.review || '').replace(/\s+/g, ' ').slice(0, 110);
     lines.push(
       `- "${m.title}" [${m.source}, ${m.sceneCount} scenes, rating=${m.rating ?? 'N/A'}/10]: arc=${arc}${
         leadActors ? `; cast=${leadActors}` : ''
       }${leadProps ? `; props=${leadProps}` : ''}${leadTdt ? `; 3DWords=${leadTdt}` : ''}${
-        reviewSnippet ? `; note="${reviewSnippet}"` : ''
-      }`
+        leadAudio ? `; audio=${leadAudio}` : ''
+      }${reviewSnippet ? `; note="${reviewSnippet}"` : ''}`
     );
   }
   return `\nMATCHED .3MM CORPUS EXEMPLARS:\n${lines.join('\n')}`;
@@ -197,7 +210,93 @@ function toSdkThinkingLevel(level?: 'MINIMAL' | 'LOW'): ThinkingLevel | undefine
   return undefined;
 }
 
-async function generateWithFallback(prompt: string, catalogSummary: CatalogSummaryPayload) {
+async function crawlDirectorFromSites(opts?: {
+  threeDmmCookie?: string;
+  redditCookie?: string;
+}): Promise<{
+  directorName: string | null;
+  source: '3dmm.com' | 'reddit.com' | 'none';
+  message: string;
+}> {
+  const fetchWithTimeout = async (url: string, headers: Record<string, string>) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    try {
+      return await fetch(url, { signal: controller.signal, headers });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let threeDmmNote = 'not logged in';
+  try {
+    const h3: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Accept: 'text/html,application/xhtml+xml',
+    };
+    if (opts?.threeDmmCookie) h3.Cookie = opts.threeDmmCookie;
+    const r3 = await fetchWithTimeout('https://3dmm.com/', h3);
+    const html3 = await r3.text();
+    if (/cf_chl_opt|Just a moment/i.test(html3)) {
+      threeDmmNote = '3dmm.com is behind Cloudflare verification';
+    } else {
+      const text3 = html3.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+      const m3 = text3.match(/\bWelcome,\s*([A-Za-z0-9_.\-]{2,36})/i);
+      const candidate = m3?.[1]?.trim();
+      if (candidate && !/^(to|back|guest|visitor|member)$/i.test(candidate)) {
+        return {
+          directorName: candidate,
+          source: '3dmm.com',
+          message: `Found director "${candidate}" from 3dmm.com.`,
+        };
+      }
+    }
+  } catch {
+    threeDmmNote = '3dmm.com unreachable';
+  }
+
+  let redditNote = 'no active Reddit session';
+  try {
+    const hr: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Accept: 'application/json,text/html',
+    };
+    if (opts?.redditCookie) hr.Cookie = opts.redditCookie;
+    const rr = await fetchWithTimeout('https://www.reddit.com/api/me.json', hr);
+    const rrText = await rr.text();
+    if (rr.ok && !/<title>\s*Blocked\s*<\/title>/i.test(rrText)) {
+      try {
+        const j = JSON.parse(rrText) as { data?: { name?: string } };
+        const uname = j?.data?.name?.trim();
+        if (uname) {
+          return {
+            directorName: uname,
+            source: 'reddit.com',
+            message: `Found director "${uname}" via reddit.com fallback.`,
+          };
+        }
+      } catch {
+        // non-JSON fallback check
+      }
+    } else if (/<title>\s*Blocked\s*<\/title>/i.test(rrText) || rr.status === 403 || rr.status === 429) {
+      redditNote = 'reddit.com blocked unauthenticated server crawler';
+    }
+  } catch {
+    redditNote = 'reddit.com unreachable';
+  }
+
+  return {
+    directorName: null,
+    source: 'none',
+    message: `Could not auto-detect external account (${threeDmmNote}; ${redditNote}). Enter your Director Name directly below.`,
+  };
+}
+
+async function generateWithFallback(
+  prompt: string,
+  catalogSummary: CatalogSummaryPayload,
+  directorName?: string
+) {
   const primaryKey = process.env.GEMINI_API_KEY?.trim() || null;
   const dotEnvKey = readDotEnvGeminiKey();
   const candidateKeys: string[] = [];
@@ -220,14 +319,17 @@ async function generateWithFallback(prompt: string, catalogSummary: CatalogSumma
     requestedSceneCount,
     requestedActorCount,
     corpusExemplars,
+    directorName,
   });
 
   const userMessage = JSON.stringify({
     storyIdea:
       trimmedPrompt.length > 0
         ? trimmedPrompt
-        : 'Create a hilarious, imaginative 6-scene 3D Movie Maker adventure with varied scene lengths, scene transitions (cut/dissolve/fadeToBlack/fadeToWhite), clear setup, progression across sets, multi-actor cast in varied costumes, animated & stretched/colored props, dynamic camera cuts, 3D word, 2D dialogue/credits, and synced MIDI/custom .3MM voices/SFX.',
-    ...(requestedSceneCount !== null ? { requestedSceneCount } : { targetSceneRange: '5-8' }),
+        : 'Create a hilarious, imaginative multi-scene (6-8+ scenes with intro & outro/credits) 3D Movie Maker adventure with varied scene lengths, scene transitions (cut/dissolve/fadeToBlack/fadeToWhite), clear setup, progression across sets, custom character/prop names, multi-actor cast in varied costumes, animated & stretched/colored props, dynamic camera cuts, 3D word, 2D dialogue/credits, and frame-specific MIDI changes/SFX/TTS voices.',
+    ...(requestedSceneCount !== null
+      ? { requestedSceneCount }
+      : { targetSceneRange: '5-12', supportsIntroAndOutro: true }),
     ...(requestedActorCount !== null ? { requestedActorCount } : {}),
     catalogSummary,
   });
@@ -283,6 +385,7 @@ async function generateWithFallback(prompt: string, catalogSummary: CatalogSumma
                   requestedSceneCount: missing,
                   requestedActorCount,
                   corpusExemplars,
+                  directorName,
                 }),
                 responseMimeType: 'application/json',
                 responseSchema: extSchema,
@@ -362,10 +465,13 @@ function resolveSapi4Params(rawVoice?: string, rawPitch?: number, rawSpeed?: num
   const clean = (rawVoice || '').trim();
   const low = clean.toLowerCase();
 
-  let canonical = 'Adult Male #2, American English (TruVoice)';
-  let limits = SAPI4_VOICE_LIMITS.bonzi;
+  let canonical = 'Sam';
+  let limits = SAPI4_VOICE_LIMITS.sam;
 
-  if (!clean || /bonzi|adult\s*male\s*#?2/i.test(low)) {
+  if (!clean) {
+    canonical = 'Sam';
+    limits = SAPI4_VOICE_LIMITS.sam;
+  } else if (/bonzi|adult\s*male\s*#?2/i.test(low)) {
     canonical = 'Adult Male #2, American English (TruVoice)';
     limits = SAPI4_VOICE_LIMITS.bonzi;
   } else if (/truvoice|adult\s*(male|female)/i.test(low)) {
@@ -375,6 +481,8 @@ function resolveSapi4Params(rawVoice?: string, rawPitch?: number, rawSpeed?: num
       canonical = `Adult Female #${femaleMatch[1]}, American English (TruVoice)`;
     } else if (maleMatch) {
       canonical = `Adult Male #${maleMatch[1]}, American English (TruVoice)`;
+    } else {
+      canonical = 'Adult Male #1, American English (TruVoice)';
     }
     limits = SAPI4_VOICE_LIMITS.bonzi;
   } else if (/mary/i.test(low)) {
@@ -410,6 +518,7 @@ function resolveSapi4Params(rawVoice?: string, rawPitch?: number, rawSpeed?: num
 }
 
 const ttsCache = new Map<string, string>();
+const SAPI4_MAX_ATTEMPTS = 10;
 
 async function startServer() {
   const app = express();
@@ -454,41 +563,58 @@ async function startServer() {
       `&voice=${encodeURIComponent(params.voice)}` +
       `&pitch=${params.pitch}&speed=${params.speed}`;
 
-    try {
-      let lastStatus = 500;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 12000);
-        try {
-          const upstream = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-              'User-Agent': 'BonziBuddy-TTS/1.0',
-            },
-          });
-          lastStatus = upstream.status;
-          if (upstream.ok) {
-            const buf = Buffer.from(await upstream.arrayBuffer());
-            if (buf.length >= 44 && buf.toString('ascii', 0, 4) === 'RIFF') {
-              const audioData = `data:audio/wav;base64,${buf.toString('base64')}`;
-              if (ttsCache.size > 160) {
-                const firstKey = ttsCache.keys().next().value;
-                if (firstKey) ttsCache.delete(firstKey);
-              }
-              ttsCache.set(cacheKey, audioData);
-              res.json({ audioData, ...params });
-              return;
+    let lastStatus = 502;
+    let lastError = '';
+    for (let attempt = 1; attempt <= SAPI4_MAX_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 9000);
+      try {
+        const upstream = await fetch(url, {
+          signal: controller.signal,
+          headers: {
+            'User-Agent': 'BonziBuddy-TTS/1.0',
+          },
+        });
+        lastStatus = upstream.status;
+        if (upstream.ok) {
+          const buf = Buffer.from(await upstream.arrayBuffer());
+          if (buf.length >= 44 && buf.toString('ascii', 0, 4) === 'RIFF') {
+            const audioData = `data:audio/wav;base64,${buf.toString('base64')}`;
+            if (ttsCache.size > 160) {
+              const firstKey = ttsCache.keys().next().value;
+              if (firstKey) ttsCache.delete(firstKey);
             }
+            ttsCache.set(cacheKey, audioData);
+            res.json({ audioData, ...params });
+            return;
           }
-        } finally {
-          clearTimeout(timer);
+          lastError = 'Upstream did not return valid RIFF WAV audio.';
+        } else {
+          lastError = `Upstream HTTP ${upstream.status}`;
         }
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : 'SAPI4 upstream fetch error.';
+      } finally {
+        clearTimeout(timer);
       }
-      res.status(502).json({ error: `BonziBuddy SAPI4 TTS returned status ${lastStatus}.` });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'SAPI4 TTS request failed.';
-      res.status(502).json({ error: msg });
+
+      if (attempt < SAPI4_MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(800, 180 * attempt)));
+      }
     }
+
+    res.status(502).json({
+      error: `SAPI4 TTS unreachable after ${SAPI4_MAX_ATTEMPTS} attempts (status ${lastStatus}${lastError ? `: ${lastError}` : ''}).`,
+    });
+  });
+
+  app.all(['/api/director/resolve', '/api/director/resolve/'], async (req, res) => {
+    const body = (req.body || {}) as { threeDmmCookie?: string; redditCookie?: string };
+    const result = await crawlDirectorFromSites({
+      threeDmmCookie: body.threeDmmCookie,
+      redditCookie: body.redditCookie,
+    });
+    res.json(result);
   });
 
   app.post(['/api/ai/generate-movie', '/api/ai/generate-movie/'], async (req, res) => {
@@ -500,9 +626,10 @@ async function startServer() {
       return;
     }
 
-    const { prompt, catalogSummary } = (req.body || {}) as {
+    const { prompt, catalogSummary, directorName } = (req.body || {}) as {
       prompt?: string;
       catalogSummary?: CatalogSummaryPayload;
+      directorName?: string;
     };
 
     if (
@@ -515,9 +642,21 @@ async function startServer() {
       return;
     }
 
+    let resolvedDirector = (directorName || '').trim();
+    if (!resolvedDirector) {
+      const crawled = await crawlDirectorFromSites();
+      if (crawled.directorName) {
+        resolvedDirector = crawled.directorName;
+      }
+    }
+
     try {
-      const moviePlan = await generateWithFallback(prompt || '', catalogSummary);
-      res.json({ moviePlan });
+      const moviePlan = await generateWithFallback(
+        prompt || '',
+        catalogSummary,
+        resolvedDirector || undefined
+      );
+      res.json({ moviePlan, directorName: resolvedDirector || undefined });
     } catch (err: unknown) {
       console.error('Gemini movie generation error:', err);
       const message =

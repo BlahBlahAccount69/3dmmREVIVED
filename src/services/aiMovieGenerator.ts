@@ -59,6 +59,7 @@ interface AiMoviePlan {
     cameraCuts?: { frame: number; viewIndex: number }[];
     actors?: {
       name: string;
+      customName?: string;
       costumePreset?: number;
       colorHex?: string;
       startFrame?: number;
@@ -68,6 +69,7 @@ interface AiMoviePlan {
     }[];
     props?: {
       name: string;
+      customName?: string;
       costumePreset?: number;
       colorHex?: string;
       startFrame?: number;
@@ -179,10 +181,37 @@ const FONT_2D_LIST = [
 ];
 
 const SIGNATURE_SOUND_PATTERNS = [
-  /funny moment|happy end|triumph|danger|scare|tension|specter|quest|mystery|geist|bistro|villain/i,
-  /explosion|rocket launch|owl hoot|thunder|siren|chuckle|laugh|crash|scream|applause|footstep|static/i,
+  /funny moment|happy end|triumph|danger|scare|tension|specter|quest|mystery|geist|bistro|villain|ghoul|wraith|spirit|safari|explore|dream|sleuth|search|howdy|imaginopolis|rockin|3d movie|clue hunt|sneaking|east side|hangin|calliope|sadness/i,
+  /explosion|rocket launch|owl hoot|thunder|siren|chuckle|laugh|crash|scream|applause|footstep|static|mega|ebase|look3|rover|ahhh|zap|thump|whiff/i,
   /surprise|oh no|hey|watch out|hurry|all right|yipee|worked|follow me|stop!|get him|creation|doggy|mega/i,
 ];
+
+const DIVERSE_SAPI4_VOICES: Array<{
+  voice: string;
+  pitch: number;
+  speed: number;
+  isFemale?: boolean;
+}> = [
+  { voice: 'Sam', pitch: 100, speed: 150 },
+  { voice: 'Mike', pitch: 112, speed: 170 },
+  { voice: 'Mary', pitch: 169, speed: 170, isFemale: true },
+  { voice: 'Adult Male #1, American English (TruVoice)', pitch: 82, speed: 145 },
+  { voice: 'Adult Female #1, American English (TruVoice)', pitch: 200, speed: 150, isFemale: true },
+  { voice: 'Adult Male #3, American English (TruVoice)', pitch: 114, speed: 155 },
+  { voice: 'Adult Female #2, American English (TruVoice)', pitch: 225, speed: 158, isFemale: true },
+  { voice: 'Adult Male #4, American English (TruVoice)', pitch: 92, speed: 148 },
+  { voice: 'Mike in Hall', pitch: 112, speed: 165 },
+  { voice: 'Mary in Hall', pitch: 169, speed: 168, isFemale: true },
+  { voice: 'Adult Male #5, American English (TruVoice)', pitch: 132, speed: 155 },
+];
+
+const FEMALE_HINT_RE =
+  /\b(mary|margaret|lucy|nakita|claire|sara|sarah|alice|anna|emma|lily|queen|princess|mom|mother|sister|girl|woman|lady|witch|nurse|grandma|mrs\.?|ms\.?)\b/i;
+
+function isBonziVoiceName(voice?: string): boolean {
+  const v = (voice || '').trim().toLowerCase();
+  return /bonzi|adult\s*male\s*#?2/i.test(v);
+}
 
 function clamp(v: number, min: number, max: number): number {
   if (!Number.isFinite(v)) return (min + max) * 0.5;
@@ -320,6 +349,7 @@ export function buildEntityKeyframes(
       rotYStart: number
     ) => void;
     onEnsureStopRest?: (stopFrame: number, nextMoveFrame: number | null, yPos: number) => void;
+    onEnsureStationaryRest?: (f0: number, f1: number, yPos: number) => void;
   }
 ): Record<number, KeyframePosition> {
   const allowColor = opts.allowColor !== false;
@@ -425,16 +455,20 @@ export function buildEntityKeyframes(
 
       let stepSpan = origSpan;
       let compressed = false;
+      const isFullSceneSmear = f0 === 0 && origSpan >= Math.max(26, totalFrames * 0.78);
+      const needsCompression = opts.isActor
+        ? (isFullSceneSmear && speed < 0.26) || (origSpan >= 30 && speed < 0.16)
+        : (isFullSceneSmear && speed < 0.45) || (origSpan >= 24 && isFastSeg && speed < 0.45);
       if (
         p0.visible !== false &&
         p1.visible !== false &&
         !isSlowAct &&
-        origSpan >= 14 &&
         dist >= 1.2 &&
-        speed < 0.85
+        needsCompression
       ) {
-        const targetSpeed = isFastSeg ? 2.4 : 1.5;
-        stepSpan = Math.round(clamp(dist / targetSpeed, 3, Math.min(origSpan - 1, 18)));
+        const targetSpeed = opts.isActor ? (isFastSeg ? 0.72 : 0.42) : isFastSeg ? 1.25 : 0.65;
+        const maxComp = Math.min(origSpan - 1, Math.max(22, Math.round(totalFrames * 0.72)));
+        stepSpan = Math.round(clamp(dist / targetSpeed, 10, Math.max(11, maxComp)));
         compressed = stepSpan < origSpan;
         if (compressed) anyCompressed = true;
       }
@@ -499,7 +533,14 @@ export function buildEntityKeyframes(
       segMoves.push(moved);
       if (moved && opts.onEnsureMoveLocomotion) {
         opts.onEnsureMoveLocomotion(f0, f1, dist / span, dx, dy, dz, p0.y, p1.y, p0.rotY);
+      } else if (!moved && opts.onEnsureStationaryRest) {
+        opts.onEnsureStationaryRest(f0, f1, p0.y);
       }
+    }
+
+    if (segMoves.length === 0 && opts.onEnsureStationaryRest) {
+      const fOnly = anchorFrames[0];
+      opts.onEnsureStationaryRest(fOnly, totalFrames, kfs[fOnly].y);
     }
 
     // Whenever an actor stops after a moving segment (either entering a stationary segment or halting before scene end),
@@ -622,11 +663,11 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
 
   const pickCategory = (category: 'music' | 'sfx' | 'speech', pattern: RegExp, limit: number) => {
     const pool = soundCatalog.filter((s) => s.category === category);
-    const scored = pool
+    const customFirst = pool
+      .filter((item) => Boolean(item.sampleFile || item.midiFileUrl))
       .map((item) => {
         const hay = `${item.name} ${item.sourceLabel || ''}`.toLowerCase();
-        let score = 0;
-        if (item.midiFileUrl || item.sampleFile) score += 4;
+        let score = 4;
         if (pattern.test(item.name)) score += 3;
         for (const tok of promptTokens) {
           if (hay.includes(tok)) score += 6;
@@ -635,8 +676,29 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
       })
       .sort((a, b) => b.score - a.score);
 
+    const scored = pool
+      .map((item) => {
+        const hay = `${item.name} ${item.sourceLabel || ''}`.toLowerCase();
+        let score = 0;
+        if (item.midiFileUrl || item.sampleFile) score += 5;
+        if (pattern.test(item.name)) score += 3;
+        for (const tok of promptTokens) {
+          if (hay.includes(tok)) score += 6;
+        }
+        // Subtle deterministic rotation across non-top items so trained-movie MIDI/SFX variety changes per prompt
+        const hash = ((item.cno * 2654435761) >>> 0) % 100;
+        return { item, score, hash };
+      })
+      .sort((a, b) => b.score - a.score || a.hash - b.hash);
+
     const merged: CatalogSoundItem[] = [];
     const seen = new Set<number>();
+    const customQuota = category === 'sfx' ? 8 : category === 'speech' ? 12 : 6;
+    for (const { item } of customFirst.slice(0, customQuota)) {
+      if (seen.has(item.cno)) continue;
+      seen.add(item.cno);
+      merged.push(item);
+    }
     for (const { item } of scored) {
       if (seen.has(item.cno)) continue;
       seen.add(item.cno);
@@ -647,20 +709,238 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
   };
 
   return [
-    ...pickCategory('music', SIGNATURE_SOUND_PATTERNS[0], 24),
-    ...pickCategory('sfx', SIGNATURE_SOUND_PATTERNS[1], 24),
+    ...pickCategory('music', SIGNATURE_SOUND_PATTERNS[0], 40),
+    ...pickCategory('sfx', SIGNATURE_SOUND_PATTERNS[1], 36),
     ...pickCategory('speech', SIGNATURE_SOUND_PATTERNS[2], 32),
   ];
 }
 
+export function diversifyAiMovieBlocking(rawScenes: AiMoviePlan['scenes'], prompt: string): void {
+  if (!Array.isArray(rawScenes) || rawScenes.length === 0) return;
+  const userRequestedRight =
+    /\b(to the right|go right|move right|walk right|run right|walking right|running right|moving right|head right|facing right|from left to right|left-to-right)\b/i.test(
+      prompt || ''
+    );
+
+  let prevSceneStopFrame: number | null = null;
+
+  for (let sIdx = 0; sIdx < rawScenes.length; sIdx++) {
+    const sp = rawScenes[sIdx];
+    const actors = sp.actors || [];
+    if (actors.length === 0) continue;
+    const totalFrames = Math.round(clamp(sp.durationFrames || 54, 12, 360));
+
+    type ActorMetric = {
+      ap: NonNullable<AiMoviePlan['scenes'][number]['actors']>[number];
+      kfs: AiKeyframePlan[];
+      firstIdx: number;
+      lastMoveIdx: number;
+      horiz: number;
+      isRightward: boolean;
+    };
+
+    const metrics: ActorMetric[] = [];
+    for (const ap of actors) {
+      if (!Array.isArray(ap.keyframes) || ap.keyframes.length === 0) continue;
+      ap.keyframes.sort((a, b) => a.frame - b.frame);
+      const kfs = ap.keyframes;
+      let firstIdx = kfs.findIndex((k) => k.visible !== false);
+      if (firstIdx < 0) firstIdx = 0;
+
+      let lastMoveIdx = -1;
+      for (let i = kfs.length - 1; i >= 1; i--) {
+        if (kfs[i].visible === false || kfs[i - 1].visible === false) continue;
+        const d = Math.hypot(kfs[i].x - kfs[i - 1].x, kfs[i].y - kfs[i - 1].y, kfs[i].z - kfs[i - 1].z);
+        if (d > 0.35) {
+          lastMoveIdx = i;
+          break;
+        }
+      }
+
+      const endIdx = lastMoveIdx >= 1 ? lastMoveIdx : firstIdx;
+      const dxTotal = kfs[endIdx].x - kfs[firstIdx].x;
+      const dzTotal = kfs[endIdx].z - kfs[firstIdx].z;
+      const horiz = Math.hypot(dxTotal, dzTotal);
+      const isRightward =
+        horiz > 1.8 && dxTotal > 1.5 && Math.abs(dzTotal) <= Math.max(2.2, dxTotal * 0.45);
+      metrics.push({ ap, kfs, firstIdx, lastMoveIdx, horiz, isRightward });
+    }
+
+    if (!userRequestedRight) {
+      const moving = metrics.filter((m) => m.horiz > 1.8);
+      const rightward = moving.filter((m) => m.isRightward);
+      const stationary = metrics.filter((m) => m.horiz <= 0.6);
+
+      if (moving.length > 0 && rightward.length >= Math.ceil(moving.length * 0.6)) {
+        const sceneHash = Math.abs(
+          (sp.sceneName || '')
+            .split('')
+            .reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) | 0, 0) +
+            sIdx * 3
+        );
+        const mode = ((sceneHash % 4) + sIdx) % 4;
+
+        // If 1 actor walks toward a stationary actor, pivot around the destination so interaction stays aligned
+        const anchorToDest = moving.length === 1 && stationary.length >= 1;
+        let cx = 0;
+        let cz = -1.2;
+        if (anchorToDest) {
+          const endKf = moving[0].kfs[moving[0].lastMoveIdx >= 1 ? moving[0].lastMoveIdx : moving[0].firstIdx];
+          cx = endKf.x;
+          cz = endKf.z;
+        } else {
+          let sumX = 0;
+          let sumZ = 0;
+          let cnt = 0;
+          for (const m of moving) {
+            for (const k of m.kfs) {
+              sumX += k.x;
+              sumZ += k.z;
+              cnt++;
+            }
+          }
+          if (cnt > 0) {
+            cx = sumX / cnt;
+            cz = sumZ / cnt;
+          }
+        }
+
+        const transformPoint = (x: number, z: number) => {
+          const rx = x - cx;
+          const rz = z - cz;
+          let nx = x;
+          let nz = z;
+          if (mode === 0) {
+            // Right-to-Left cross with subtle depth slant
+            nx = cx - rx;
+            nz = cz + rz + rx * 0.14;
+          } else if (mode === 1) {
+            // Back-to-Front Diagonal Approach (+72 deg)
+            nx = cx + rx * 0.31 - rz * 0.95;
+            nz = (anchorToDest ? cz : -1.4) + (rx * 0.95 + rz * 0.31) * 0.72;
+          } else if (mode === 2) {
+            // Front-to-Back Cross (-108 deg)
+            nx = cx - rx * 0.31 + rz * 0.95;
+            nz = (anchorToDest ? cz : -1.4) + (-rx * 0.95 - rz * 0.31) * 0.72;
+          } else {
+            // Back-Right to Front-Left Diagonal (+138 deg)
+            nx = cx - rx * 0.74 - rz * 0.67;
+            nz = (anchorToDest ? cz : -1.2) + (rx * 0.67 - rz * 0.74) * 0.75;
+          }
+          return {
+            x: Number(clamp(nx, -10.5, 10.5).toFixed(2)),
+            z: Number(clamp(nz, -9.5, 6.2).toFixed(2)),
+          };
+        };
+
+        const targetsToTransform = anchorToDest ? rightward : moving;
+        for (const m of targetsToTransform) {
+          for (let i = 0; i < m.kfs.length; i++) {
+            const p = transformPoint(m.kfs[i].x, m.kfs[i].z);
+            m.kfs[i].x = p.x;
+            m.kfs[i].z = p.z;
+          }
+          for (let i = 0; i < m.kfs.length - 1; i++) {
+            const dx = m.kfs[i + 1].x - m.kfs[i].x;
+            const dz = m.kfs[i + 1].z - m.kfs[i].z;
+            if (Math.hypot(dx, dz) > 0.35) {
+              const travelRot = Number(Math.atan2(dx, dz).toFixed(3));
+              m.kfs[i].rotY = travelRot;
+              if (Math.abs(Math.abs(m.kfs[i + 1].rotY) - Math.PI / 2) < 0.25) {
+                m.kfs[i + 1].rotY = travelRot;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Stagger identical stop frames and overlapping final resting points
+    const sceneStops: Array<{ x: number; z: number; frame: number }> = [];
+    for (let mIdx = 0; mIdx < metrics.length; mIdx++) {
+      const m = metrics[mIdx];
+      if (m.lastMoveIdx < 1) continue;
+      const stopKf = m.kfs[m.lastMoveIdx];
+      const prevKf = m.kfs[m.lastMoveIdx - 1];
+      const origStopF = stopKf.frame;
+
+      const collidesFrame = (f: number) =>
+        sceneStops.some((s) => Math.abs(s.frame - f) <= 2) ||
+        (prevSceneStopFrame !== null && Math.abs(prevSceneStopFrame - f) <= 2);
+
+      if (collidesFrame(origStopF) && totalFrames >= 20) {
+        const candidates = [origStopF + 7, origStopF - 6, origStopF + 11, origStopF - 10, origStopF + 4];
+        const minAllowed = Math.min(totalFrames - 3, prevKf.frame + 4);
+        const maxAllowed = Math.max(minAllowed, totalFrames - 2);
+        let chosen = origStopF;
+        for (const cand of candidates) {
+          if (cand >= minAllowed && cand <= maxAllowed && !collidesFrame(cand)) {
+            chosen = cand;
+            break;
+          }
+        }
+        if (chosen === origStopF) {
+          chosen = Math.round(clamp(origStopF + (mIdx % 2 === 0 ? 6 : -5), minAllowed, maxAllowed));
+        }
+
+        const delta = chosen - origStopF;
+        if (delta !== 0) {
+          stopKf.frame = chosen;
+          for (let j = m.lastMoveIdx + 1; j < m.kfs.length; j++) {
+            if (m.kfs[j].frame < totalFrames && m.kfs[j].visible !== false) {
+              m.kfs[j].frame = Math.round(clamp(m.kfs[j].frame + delta, chosen + 1, totalFrames));
+            }
+          }
+          if (Array.isArray(m.ap.actionSegments)) {
+            for (const seg of m.ap.actionSegments) {
+              if (seg.frame >= origStopF - 2) {
+                seg.frame = Math.round(clamp(seg.frame + delta, chosen, totalFrames));
+              }
+            }
+          }
+        }
+      }
+
+      if (sceneStops.some((s) => Math.hypot(s.x - stopKf.x, s.z - stopKf.z) < 1.25)) {
+        const altX = Number(clamp(stopKf.x + (mIdx % 2 === 0 ? 2.4 : -2.4), -10.5, 10.5).toFixed(2));
+        const altZ = Number(clamp(stopKf.z + (mIdx % 2 === 0 ? -1.4 : 1.4), -9.5, 6.2).toFixed(2));
+        for (let j = m.lastMoveIdx; j < m.kfs.length; j++) {
+          if (Math.hypot(m.kfs[j].x - stopKf.x, m.kfs[j].z - stopKf.z) < 0.2) {
+            m.kfs[j].x = altX;
+            m.kfs[j].z = altZ;
+          }
+        }
+        stopKf.x = altX;
+        stopKf.z = altZ;
+        const dx = stopKf.x - prevKf.x;
+        const dz = stopKf.z - prevKf.z;
+        if (Math.hypot(dx, dz) > 0.35) {
+          prevKf.rotY = Number(Math.atan2(dx, dz).toFixed(3));
+        }
+      }
+
+      sceneStops.push({ x: stopKf.x, z: stopKf.z, frame: stopKf.frame });
+      if (mIdx === 0) {
+        prevSceneStopFrame = stopKf.frame;
+      }
+    }
+  }
+}
+
 async function requestAiMoviePlan(
   prompt: string,
-  catalogSummary: CatalogSummaryPayload
+  catalogSummary: CatalogSummaryPayload,
+  directorName?: string
 ): Promise<AiMoviePlan> {
+  const trimmedDirector = directorName?.trim();
   const res = await fetch('/api/ai/generate-movie', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, catalogSummary }),
+    body: JSON.stringify({
+      prompt,
+      catalogSummary,
+      ...(trimmedDirector ? { directorName: trimmedDirector } : {}),
+    }),
   });
 
   const contentType = res.headers.get('content-type') || '';
@@ -692,8 +972,9 @@ export async function generateAiMovie(options: {
   prompt: string;
   catalog: ThreeDmmCatalog;
   soundCatalog: CatalogSoundItem[];
+  directorName?: string;
 }): Promise<Movie> {
-  const { prompt, catalog, soundCatalog } = options;
+  const { prompt, catalog, soundCatalog, directorName } = options;
   if (catalog.scenes.length === 0 || catalog.actors.length === 0) {
     throw new Error('3D Movie Maker catalog is still loading. Please wait a moment and try again.');
   }
@@ -726,8 +1007,9 @@ export async function generateAiMovie(options: {
     })),
   };
 
-  const plan = await requestAiMoviePlan(prompt, catalogSummary);
+  const plan = await requestAiMoviePlan(prompt, catalogSummary, directorName);
   const rawScenes = plan.scenes || [];
+  diversifyAiMovieBlocking(rawScenes, prompt);
 
   // Parallel pre-hydration of TDT swatches, unique TMPLS.3CN templates, and all matched sounds (SNDS, .3MM custom)
   const matchedActorsMap = new Map<string, CatalogActorItem>();
@@ -769,6 +1051,24 @@ export async function generateAiMovie(options: {
     { audioData: string; midiData?: string; isMidi: boolean; isCustomAudio?: boolean }
   >();
 
+  const allowBonziExplicit = /\bbonzi\b/i.test(prompt || '');
+  const speakerVoiceMap = new Map<string, { voice: string; pitch: number; speed: number }>();
+  let bonziSpeakersCount = 0;
+  let poolCursor = 0;
+  const pickNextDiversePreset = (speakerKey: string) => {
+    const preferFemale = FEMALE_HINT_RE.test(speakerKey);
+    const candidates = preferFemale
+      ? DIVERSE_SAPI4_VOICES.filter((v) => v.isFemale)
+      : DIVERSE_SAPI4_VOICES;
+    const chosen = candidates[poolCursor % candidates.length];
+    poolCursor++;
+    return { voice: chosen.voice, pitch: chosen.pitch, speed: chosen.speed };
+  };
+
+  const resolvedTtsByLine = new Map<
+    string,
+    { voice: string; pitch?: number; speed?: number }
+  >();
   const ttsTasks: Array<{
     key: string;
     text: string;
@@ -783,11 +1083,51 @@ export async function generateAiMovie(options: {
       const vp = sp.ttsVoices![vIdx];
       const text = (vp.text || '').trim().slice(0, 220);
       if (!text) continue;
-      const voice = (vp.voice || 'Adult Male #2, American English (TruVoice)').trim();
-      const key = `${voice}|${vp.pitch ?? ''}|${vp.speed ?? ''}|${text}`;
+
+      const speakerKey = (vp.speaker || `speaker_${sIdx}_${vIdx}`).trim().toLowerCase();
+      let chosenVoice = (vp.voice || '').trim();
+      let chosenPitch = vp.pitch;
+      let chosenSpeed = vp.speed;
+
+      const cachedSpeaker = speakerVoiceMap.get(speakerKey);
+      if (cachedSpeaker) {
+        chosenVoice = cachedSpeaker.voice;
+        if (chosenPitch === undefined) chosenPitch = cachedSpeaker.pitch;
+        if (chosenSpeed === undefined) chosenSpeed = cachedSpeaker.speed;
+      } else {
+        if (!chosenVoice) {
+          const picked = pickNextDiversePreset(speakerKey);
+          chosenVoice = picked.voice;
+          chosenPitch = chosenPitch ?? picked.pitch;
+          chosenSpeed = chosenSpeed ?? picked.speed;
+        } else if (isBonziVoiceName(chosenVoice) && !allowBonziExplicit) {
+          if (bonziSpeakersCount >= 1) {
+            const picked = pickNextDiversePreset(speakerKey);
+            chosenVoice = picked.voice;
+            chosenPitch = picked.pitch;
+            chosenSpeed = picked.speed;
+          } else {
+            bonziSpeakersCount++;
+          }
+        }
+        speakerVoiceMap.set(speakerKey, {
+          voice: chosenVoice,
+          pitch: chosenPitch ?? 120,
+          speed: chosenSpeed ?? 155,
+        });
+      }
+
+      const lineRefId = `${sIdx}:${vIdx}`;
+      resolvedTtsByLine.set(lineRefId, {
+        voice: chosenVoice,
+        pitch: chosenPitch,
+        speed: chosenSpeed,
+      });
+
+      const key = `${chosenVoice}|${chosenPitch ?? ''}|${chosenSpeed ?? ''}|${text}`;
       if (seenTtsKeys.has(key)) continue;
       seenTtsKeys.add(key);
-      ttsTasks.push({ key, text, voice, pitch: vp.pitch, speed: vp.speed });
+      ttsTasks.push({ key, text, voice: chosenVoice, pitch: chosenPitch, speed: chosenSpeed });
     }
   }
 
@@ -966,16 +1306,23 @@ export async function generateAiMovie(options: {
           }
         },
         onEnsureStopRest: (stopFrame, nextMoveFrame, yPos) => {
-          const restAct = tmpl?.actions.find((a) => /^at rest$/i.test(a.name.trim())) ||
+          const restAct =
+            tmpl?.actions.find((a) => /^at rest$/i.test(a.name.trim())) ||
             tmpl?.actions.find((a) => /at rest/i.test(a.name)) ||
             tmpl?.actions[0] || { anid: 0, name: 'At Rest' };
 
-          // Pull any delayed "At Rest" sitting a few frames after stopFrame right onto stopFrame
-          const stopLimit = nextMoveFrame ?? totalFrames;
+          // Clear delayed "At Rest" or lingering locomotion actions inside the stationary window (stopFrame, stopLimit)
+          const stopLimit = nextMoveFrame ?? totalFrames + 1;
           for (const fkStr of Object.keys(akfs)) {
             const fk = Number(fkStr);
-            if (fk > stopFrame && fk < stopLimit && /^at rest$/i.test(akfs[fk].actionName.trim())) {
-              delete akfs[fk];
+            if (fk > stopFrame && fk < stopLimit) {
+              const nm = akfs[fk].actionName.trim();
+              if (
+                /^at rest$/i.test(nm) ||
+                (/walk|run|sneak|crawl|jump|hop/i.test(nm) && !(/fly/i.test(nm) && yPos > 1.2))
+              ) {
+                delete akfs[fk];
+              }
             }
           }
 
@@ -987,12 +1334,34 @@ export async function generateAiMovie(options: {
             akfs[stopFrame] = { anid: restAct.anid, actionName: restAct.name };
           }
         },
+        onEnsureStationaryRest: (f0, f1, yPos) => {
+          const restAct =
+            tmpl?.actions.find((a) => /^at rest$/i.test(a.name.trim())) ||
+            tmpl?.actions.find((a) => /at rest/i.test(a.name)) ||
+            tmpl?.actions[0] || { anid: 0, name: 'At Rest' };
+          const curAtStart = resolveActionNameAtFrame(akfs, f0);
+          const hoveringInAir = /fly/i.test(curAtStart) && yPos > 1.2;
+          if (/walk|run|sneak|crawl|fly|jump|hop/i.test(curAtStart) && !hoveringInAir) {
+            akfs[f0] = { anid: restAct.anid, actionName: restAct.name };
+          }
+          for (const fkStr of Object.keys(akfs)) {
+            const fk = Number(fkStr);
+            if (fk > f0 && fk < f1) {
+              const nm = akfs[fk].actionName.trim();
+              if (/walk|run|sneak|crawl|jump|hop/i.test(nm) && !(/fly/i.test(nm) && yPos > 1.2)) {
+                akfs[fk] = { anid: restAct.anid, actionName: restAct.name };
+              }
+            }
+          }
+        },
       });
+
+      const displayActorName = (ap.customName || '').trim().slice(0, 48) || catActor.name;
 
       actors.push({
         id: `ai_actor_${sIdx}_${aIdx}_${Math.random().toString(36).slice(2, 6)}`,
         tmplCno: catActor.tmplCno,
-        name: catActor.name,
+        name: displayActorName,
         anid: akfs[0].anid,
         actionName: akfs[0].actionName,
         actionKeyframes: akfs,
@@ -1029,11 +1398,12 @@ export async function generateAiMovie(options: {
       }
 
       const costumeCmids = resolveCostumeCmids(tmpl, pp.costumePreset);
+      const displayPropName = (pp.customName || '').trim().slice(0, 48) || catProp.name;
 
       props.push({
         id: `ai_prop_${sIdx}_${pIdx}_${Math.random().toString(36).slice(2, 6)}`,
         tmplCno: catProp.tmplCno,
-        name: catProp.name,
+        name: displayPropName,
         action: pakfs[0].action,
         ...(pakfs[0].anid !== undefined ? { anid: pakfs[0].anid } : {}),
         actionKeyframes: pakfs,
@@ -1201,14 +1571,16 @@ export async function generateAiMovie(options: {
       });
     }
 
-    // Populate BonziBuddy-TTS / SAPI4 synthesized voice lines (with speed, pitch, and waitForFinish)
-    const sortedTts = [...(sp.ttsVoices || [])].sort((a, b) => (a.frame ?? 0) - (b.frame ?? 0));
-    for (let vIdx = 0; vIdx < sortedTts.length; vIdx++) {
-      const vp = sortedTts[vIdx];
+    // Populate SAPI4 synthesized voice lines (varied voices, speed, pitch, waitForFinish; skip if unreachable after 10 retries)
+    const indexedTts = (sp.ttsVoices || [])
+      .map((vp, origIdx) => ({ vp, origIdx }))
+      .sort((a, b) => (a.vp.frame ?? 0) - (b.vp.frame ?? 0));
+    for (const { vp, origIdx } of indexedTts) {
       const text = (vp.text || '').trim().slice(0, 220);
       if (!text) continue;
-      const voice = (vp.voice || 'Adult Male #2, American English (TruVoice)').trim();
-      const key = `${voice}|${vp.pitch ?? ''}|${vp.speed ?? ''}|${text}`;
+      const resolved = resolvedTtsByLine.get(`${sIdx}:${origIdx}`);
+      if (!resolved) continue;
+      const key = `${resolved.voice}|${resolved.pitch ?? ''}|${resolved.speed ?? ''}|${text}`;
       const synth = ttsResultMap.get(key);
       if (!synth) continue;
 
@@ -1219,7 +1591,7 @@ export async function generateAiMovie(options: {
       usedVoiceFrames.add(f);
       const speakerTag = vp.speaker ? `${vp.speaker.trim()}: ` : '';
       audios.push({
-        id: `ai_tts_${sIdx}_${vIdx}_${Math.random().toString(36).slice(2, 6)}`,
+        id: `ai_tts_${sIdx}_${origIdx}_${Math.random().toString(36).slice(2, 6)}`,
         frame: f,
         filename: `${speakerTag}${text.slice(0, 28)}`,
         audioData: synth.audioData,
