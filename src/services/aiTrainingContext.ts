@@ -228,7 +228,7 @@ CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene 
 
 9. CAPTIONS
    - You CAN add captions when theres a voice. It might be required by the user, but you can also use it when the user doesnt request for it.
-   
+
 STRICT RULE: Only use exact scene names, actor names, prop names, action names, font/shape names, TDT action names, and sound names present in catalogSummary.`;
 
 export function buildSystemInstruction(options: {
@@ -247,7 +247,7 @@ export function buildSystemInstruction(options: {
   const actorConstraintNote =
     requestedActorCount !== null
       ? `\nMANDATORY CAST SIZE: Include at least ${requestedActorCount} actors (unlimited cast supported — use distinct actors and varied costumePreset/customName values).`
-      : `\nUNLIMITED CAST: Never restrict actor counts per scene — include large crowds or multi-character ensembles freely whenever appropriate.`;
+      : `\nUNLIMITED CAST: Never restrict actor counts per scene — include large crowds or multi-character ensembles freely. It must be more than five actors, most actors, or all.`;
 
   const cleanDirector = (directorName || '').trim();
   const directorNote = cleanDirector
