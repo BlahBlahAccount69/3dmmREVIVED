@@ -1070,6 +1070,409 @@ export function diversifyAiMovieBlocking(rawScenes: AiMoviePlan['scenes'], promp
   }
 }
 
+const CORPUS_EXPRESSIVE_MOTIFS: string[][] = [
+  ['Greet', 'Talk', 'Laugh', 'At Rest'],
+  ['Think', 'Talk', 'Jump', 'At Rest'],
+  ['Talk', 'Laugh', 'Dance', 'At Rest'],
+  ['Greet', 'Think', 'Talk', 'At Rest'],
+  ['Think', 'Spin', 'Greet', 'At Rest'],
+];
+
+const PET_EXPRESSIVE_MOTIFS: string[][] = [
+  ['Greet', 'Jump', 'Spin', 'At Rest'],
+  ['Dance', 'Jump', 'Talk', 'At Rest'],
+];
+
+const HERO_ACTION_MOTIFS: string[][] = [
+  ['Think', 'Greet', 'Karate Kick', 'At Rest'],
+  ['Talk', 'Jump', 'Greet', 'At Rest'],
+];
+
+function isLocomotionActionName(name?: string): boolean {
+  return /\b(walk|run|sneak|crawl|fly)\b/i.test(name || '');
+}
+
+function isRestActionName(name?: string): boolean {
+  return /^(?:at rest|none|idle)?$/i.test((name || '').trim());
+}
+
+export function refineTrained3dmmChoreography(
+  rawScenes: AiMoviePlan['scenes'],
+  prompt: string,
+  catalogScenes: CatalogSceneItem[],
+  soundCatalog: CatalogSoundItem[]
+): void {
+  if (!Array.isArray(rawScenes) || rawScenes.length === 0) return;
+
+  const allowSlowUser =
+    /\b(slow|slowly|snail|turtle|sloth|creep|tiptoe|gentle|gently|gradual|drift)\b/i.test(
+      prompt || ''
+    );
+  const soundCatByName = new Map<string, CatalogSoundItem>();
+  for (const s of soundCatalog || []) {
+    soundCatByName.set(s.name.trim().toLowerCase(), s);
+  }
+
+  for (let sIdx = 0; sIdx < rawScenes.length; sIdx++) {
+    const sp = rawScenes[sIdx];
+    const totalFrames = Math.round(clamp(sp.durationFrames || 54, 12, 360));
+    const matchedBg = findSceneMatch(sp.sceneName, catalogScenes);
+    const viewCount = Math.max(1, matchedBg.views.length);
+
+    // 1) Corpus-trained camera cut rhythm (every ~12-20f across multi-view scenes)
+    const isSpecialPaletteBg = /ge-black/i.test(matchedBg.name);
+    const existingCuts = [...(sp.cameraCuts || [])]
+      .map((c) => ({
+        frame: Math.round(clamp(c.frame ?? 0, 0, totalFrames)),
+        viewIndex: Math.round(clamp(c.viewIndex ?? 0, 0, viewCount - 1)),
+      }))
+      .sort((a, b) => a.frame - b.frame);
+
+    if (existingCuts.length === 0 || existingCuts[0].frame > 0) {
+      existingCuts.unshift({ frame: 0, viewIndex: existingCuts[0]?.viewIndex ?? 0 });
+    }
+    if (!isSpecialPaletteBg && viewCount > 1 && totalFrames >= 30 && existingCuts.length < 2) {
+      const targetCutCount = Math.min(4, Math.max(2, Math.floor(totalFrames / 18) + 1));
+      const step = Math.round(clamp(totalFrames / targetCutCount, 12, 22));
+      const baseView = existingCuts[0].viewIndex;
+      const mergedByFrame = new Map<number, number>();
+      for (const c of existingCuts) mergedByFrame.set(c.frame, c.viewIndex);
+      for (let k = 1; k < targetCutCount; k++) {
+        const f = Math.round(k * step);
+        if (f >= 8 && f <= totalFrames - 5 && !mergedByFrame.has(f)) {
+          mergedByFrame.set(f, (baseView + k) % viewCount);
+        }
+      }
+      sp.cameraCuts = Array.from(mergedByFrame.entries())
+        .map(([frame, viewIndex]) => ({ frame, viewIndex }))
+        .sort((a, b) => a.frame - b.frame);
+    } else {
+      sp.cameraCuts = existingCuts;
+    }
+
+    const actors = sp.actors || [];
+    if (actors.length === 0) continue;
+
+    // 2) Ensure valid sorted keyframes and de-stack overlapping initial/crowd stage slots
+    for (let aIdx = 0; aIdx < actors.length; aIdx++) {
+      const ap = actors[aIdx];
+      if (!Array.isArray(ap.keyframes) || ap.keyframes.length === 0) {
+        const slotX = Number(((aIdx - (actors.length - 1) * 0.5) * 3.0).toFixed(2));
+        ap.keyframes = [{ frame: 0, x: slotX, y: 0, z: -1.5 - (aIdx % 3) * 1.6, rotY: 0 }];
+      }
+      ap.keyframes.sort((a, b) => a.frame - b.frame);
+      ap.actionSegments = [...(ap.actionSegments || [])]
+        .map((seg) => ({
+          frame: Math.round(clamp(seg.frame ?? 0, 0, totalFrames)),
+          actionName: (seg.actionName || 'At Rest').trim() || 'At Rest',
+        }))
+        .sort((a, b) => a.frame - b.frame);
+    }
+
+    const occupiedStartSpots: Array<{ x: number; z: number }> = [];
+    for (let aIdx = 0; aIdx < actors.length; aIdx++) {
+      const ap = actors[aIdx];
+      const kfs = ap.keyframes!;
+      const firstVis = kfs.find((k) => k.visible !== false) || kfs[0];
+      const lastVis = [...kfs].reverse().find((k) => k.visible !== false) || kfs[kfs.length - 1];
+      const tooClose = occupiedStartSpots.some(
+        (p) => Math.hypot(p.x - firstVis.x, p.z - firstVis.z) < 1.65
+      );
+      if (tooClose) {
+        const tier = aIdx % 3; // 0: midground, 1: foreground, 2: background
+        const depthTargetZ = tier === 1 ? 2.4 : tier === 2 ? -5.8 : -1.2;
+        const sideSign = aIdx % 2 === 0 ? 1 : -1;
+        const ringOffset = Math.floor(aIdx / 2) + 1;
+        const targetX = Number(clamp(firstVis.x + sideSign * (1.8 + ringOffset * 1.4), -10.2, 10.2).toFixed(2));
+        const targetZ = Number(clamp(depthTargetZ + ((aIdx % 5) - 2) * 0.55, -8.8, 5.4).toFixed(2));
+        const dxShift = targetX - firstVis.x;
+        const dzShift = targetZ - firstVis.z;
+        const isStationary = Math.hypot(lastVis.x - firstVis.x, lastVis.z - firstVis.z) < 0.6;
+        for (const k of kfs) {
+          if (isStationary || Math.hypot(k.x - firstVis.x, k.z - firstVis.z) < 0.35) {
+            k.x = Number(clamp(k.x + dxShift, -10.5, 10.5).toFixed(2));
+            k.z = Number(clamp(k.z + dzShift, -9.2, 5.8).toFixed(2));
+          }
+        }
+        occupiedStartSpots.push({ x: targetX, z: targetZ });
+      } else {
+        occupiedStartSpots.push({ x: firstVis.x, z: firstVis.z });
+      }
+    }
+
+    // Collect scene speech & shock/SFX frames for dialogue & reaction sync
+    const speechEvents: Array<{ frame: number; speaker?: string; isYell: boolean }> = [];
+    for (const vp of sp.ttsVoices || []) {
+      speechEvents.push({
+        frame: Math.round(clamp(vp.frame ?? 0, 0, totalFrames)),
+        speaker: vp.speaker,
+        isYell: /!|nooo|aaah|whoa|stop|hurry|help/i.test(vp.text || ''),
+      });
+    }
+    const shockFrames: number[] = [];
+    for (const ac of sp.audioCues || []) {
+      const f = Math.round(clamp(ac.frame ?? 0, 0, totalFrames));
+      const low = (ac.soundName || '').trim().toLowerCase();
+      const cat = soundCatByName.get(low);
+      if (cat?.category === 'speech') {
+        speechEvents.push({
+          frame: f,
+          isYell: /nooo|aaah|whoa|stop|watch out|oh no|help|get him/i.test(low),
+        });
+      }
+      if (/explosion|bang|crash|scream|owl|siren|thunder|surprise|oh no|watch out|zap|monster/i.test(low)) {
+        shockFrames.push(f);
+      }
+    }
+
+    // Hero prop action enrichment + explosion shock frames
+    for (const pp of sp.props || []) {
+      const pName = pp.name || '';
+      const segs = (pp.actionSegments = pp.actionSegments || []);
+      const pkfs = pp.keyframes || [];
+      if (/explosio/i.test(pName)) {
+        const hasBang = segs.some((s) => /bang|grow/i.test(s.actionName || ''));
+        const bangF = Math.round(clamp(pp.startFrame ?? Math.round(totalFrames * 0.45), 0, Math.max(0, totalFrames - 4)));
+        if (!hasBang) {
+          segs.push({ frame: bangF, actionName: 'Bang!' });
+        }
+        if (pp.startFrame === undefined && totalFrames >= 24 && !pkfs.some((k) => k.visible === false)) {
+          const ref = pkfs[0] || { frame: 0, x: 0, y: 0, z: -1, rotY: 0 };
+          pp.startFrame = bangF;
+          pp.endFrame = Math.min(totalFrames, bangF + 10);
+          if (pkfs.length === 1) {
+            pkfs.push({ ...ref, frame: bangF });
+          }
+        }
+        shockFrames.push(bangF);
+      } else if (/rocket/i.test(pName) && pkfs.length >= 2) {
+        if (!segs.some((s) => /fly/i.test(s.actionName || ''))) {
+          segs.push({ frame: 0, actionName: 'Fly' });
+        }
+      } else if (/safe|chest|coffin/i.test(pName)) {
+        if (segs.length === 0 || segs.every((s) => isRestActionName(s.actionName))) {
+          segs.push({ frame: Math.round(clamp(totalFrames * 0.25, 2, Math.max(2, totalFrames - 6))), actionName: 'Open and Close' });
+        }
+      }
+    }
+
+    // 3) Break lazy 0->dur slides, enrich static statues with multi-beat corpus chains, face partners
+    const findPartnerPos = (selfIdx: number, refFrame: number) => {
+      const selfKfs = actors[selfIdx].keyframes!;
+      const selfPt =
+        [...selfKfs].reverse().find((k) => k.frame <= refFrame && k.visible !== false) ||
+        selfKfs.find((k) => k.visible !== false) ||
+        selfKfs[0];
+      let bestDist = Infinity;
+      let bestPt: { x: number; z: number } | null = null;
+      for (let o = 0; o < actors.length; o++) {
+        if (o === selfIdx) continue;
+        const okfs = actors[o].keyframes!;
+        const opt =
+          [...okfs].reverse().find((k) => k.frame <= refFrame && k.visible !== false) ||
+          okfs.find((k) => k.visible !== false);
+        if (!opt) continue;
+        const d = Math.hypot(opt.x - selfPt.x, opt.z - selfPt.z);
+        if (d > 0.3 && d < bestDist) {
+          bestDist = d;
+          bestPt = opt;
+        }
+      }
+      return bestPt ? Math.atan2(bestPt.x - selfPt.x, bestPt.z - selfPt.z) : null;
+    };
+
+    for (let aIdx = 0; aIdx < actors.length; aIdx++) {
+      const ap = actors[aIdx];
+      const kfs = ap.keyframes!;
+      const segs = ap.actionSegments!;
+      const visStart = Math.round(clamp(ap.startFrame ?? (kfs.find((k) => k.visible !== false)?.frame ?? 0), 0, totalFrames - 2));
+      const visEnd = Math.round(clamp(ap.endFrame ?? totalFrames, visStart + 2, totalFrames));
+      const span = visEnd - visStart;
+
+      const isPet = /\b(cathy|sasha|fabrice)\b/i.test(`${ap.name} ${ap.customName || ''}`);
+      const isHero = /\b(henry|wanda|crash)\b/i.test(`${ap.name} ${ap.customName || ''}`);
+      const motifPool = isPet ? PET_EXPRESSIVE_MOTIFS : isHero ? HERO_ACTION_MOTIFS : CORPUS_EXPRESSIVE_MOTIFS;
+      const motif = motifPool[(sIdx + aIdx) % motifPool.length];
+
+      const visibleKfs = kfs.filter((k) => k.visible !== false);
+      const firstKf = visibleKfs[0] || kfs[0];
+      const lastKf = visibleKfs[visibleKfs.length - 1] || kfs[kfs.length - 1];
+      const totalHoriz = Math.hypot(lastKf.x - firstKf.x, lastKf.z - firstKf.z);
+      const totalVert = Math.abs(lastKf.y - firstKf.y);
+
+      const distinctNonRestCount = new Set(
+        segs.map((s) => s.actionName.trim().toLowerCase()).filter((nm) => !isRestActionName(nm))
+      ).size;
+
+      // Case A: Full-scene lazy single linear slide (2 visible keyframes spanning >=75% of visibility window)
+      if (
+        !allowSlowUser &&
+        visibleKfs.length === 2 &&
+        totalHoriz >= 1.6 &&
+        lastKf.frame - firstKf.frame >= Math.max(24, span * 0.72) &&
+        span >= 24
+      ) {
+        const stagger = aIdx === 0 || span < 30 ? 0 : Math.min((aIdx % 4) * 3, Math.floor(span * 0.22));
+        const departF = Math.min(visEnd - 12, firstKf.frame + stagger);
+        const travelDur = Math.round(
+          clamp(totalHoriz / 0.56, 7, Math.min(15, Math.max(8, Math.floor((visEnd - departF) * 0.44))))
+        );
+        const arriveF = Math.min(visEnd - 6, departF + travelDur);
+        const travelYaw = Number(Math.atan2(lastKf.x - firstKf.x, lastKf.z - firstKf.z).toFixed(3));
+        const startAct =
+          segs.find((s) => isLocomotionActionName(s.actionName))?.actionName ||
+          (firstKf.y > 1.2 || lastKf.y > 1.2 ? 'Fly' : totalHoriz / travelDur >= 1.3 ? 'Run' : 'Walk Fast');
+
+        const nextKfs: AiKeyframePlan[] = [];
+        if (departF > firstKf.frame) {
+          nextKfs.push({ ...firstKf, frame: firstKf.frame, rotY: travelYaw });
+          nextKfs.push({ ...firstKf, frame: departF, rotY: travelYaw });
+        } else {
+          nextKfs.push({ ...firstKf, frame: firstKf.frame, rotY: travelYaw });
+        }
+        nextKfs.push({ ...lastKf, frame: arriveF, rotY: travelYaw });
+        ap.keyframes = nextKfs;
+
+        // Turn toward partner after arriving
+        const partnerYaw = findPartnerPos(aIdx, arriveF + 2);
+        const endYaw = partnerYaw !== null ? Number(partnerYaw.toFixed(3)) : travelYaw;
+        nextKfs.push({ ...lastKf, frame: visEnd, rotY: endYaw });
+
+        const nextSegs: AiActionSegmentPlan[] = [];
+        if (departF > visStart) {
+          nextSegs.push({ frame: visStart, actionName: 'At Rest' });
+        }
+        nextSegs.push({ frame: departF, actionName: startAct });
+        const holdLen = visEnd - arriveF;
+        if (holdLen >= 16) {
+          nextSegs.push({ frame: arriveF, actionName: motif[0] });
+          nextSegs.push({ frame: Math.min(visEnd - 4, arriveF + 7), actionName: motif[1] });
+          nextSegs.push({ frame: Math.min(visEnd - 1, arriveF + 15), actionName: motif[3] });
+        } else {
+          nextSegs.push({ frame: arriveF, actionName: motif[0] });
+          if (holdLen >= 9) {
+            nextSegs.push({ frame: visEnd - 3, actionName: 'At Rest' });
+          }
+        }
+        ap.actionSegments = nextSegs;
+      } else if (!allowSlowUser && distinctNonRestCount <= 1 && span >= 24) {
+        // Case B & C: Moving actors missing post-stop acting OR stationary statues stuck on 1 action
+        // Stagger crowd entrances on dense casts when safe
+        const hasEarlySpeech = speechEvents.some((ev) => ev.frame <= 6);
+        if (actors.length > 5 && aIdx >= 4 && ap.startFrame === undefined && totalFrames >= 36 && !hasEarlySpeech && totalHoriz < 0.6) {
+          ap.startFrame = Math.min(Math.floor(totalFrames * 0.25), (aIdx - 3) * 3);
+        }
+
+        const effectiveStart = Math.max(visStart, ap.startFrame ?? visStart);
+        // Find stationary hold window to populate with 3-beat expressive chain
+        let moveEndF = effectiveStart;
+        for (let i = 1; i < visibleKfs.length; i++) {
+          if (Math.hypot(visibleKfs[i].x - visibleKfs[i - 1].x, visibleKfs[i].z - visibleKfs[i - 1].z) > 0.45) {
+            moveEndF = Math.max(moveEndF, visibleKfs[i].frame);
+          }
+        }
+
+        // Face partner on stationary segments if still frozen at rotY=0
+        if (totalHoriz < 0.6) {
+          const partnerYaw = findPartnerPos(aIdx, effectiveStart);
+          if (partnerYaw !== null && Math.abs(firstKf.rotY) < 0.08) {
+            for (const k of kfs) {
+              k.rotY = Number(partnerYaw.toFixed(3));
+            }
+          }
+        } else {
+          const partnerYaw = findPartnerPos(aIdx, moveEndF + 1);
+          if (partnerYaw !== null && Math.abs(lastKf.rotY) < 0.08) {
+            lastKf.rotY = Number(partnerYaw.toFixed(3));
+          }
+        }
+
+        const beatStart = moveEndF > effectiveStart ? moveEndF : effectiveStart + ((aIdx % 3) * 2);
+        const avail = visEnd - beatStart;
+        if (avail >= 16) {
+          const step = Math.round(clamp(avail / 3.4, 7, 13));
+          const merged = [...(ap.actionSegments || [])];
+          const addIfClear = (f: number, act: string) => {
+            if (f < effectiveStart || f >= visEnd) return;
+            if (!merged.some((s) => Math.abs(s.frame - f) <= 3)) {
+              merged.push({ frame: f, actionName: act });
+            }
+          };
+          addIfClear(beatStart, motif[0]);
+          addIfClear(beatStart + step, motif[1]);
+          if (avail >= 24) addIfClear(beatStart + step * 2, motif[2]);
+          addIfClear(Math.min(visEnd - 2, beatStart + step * 3), 'At Rest');
+          ap.actionSegments = merged.sort((a, b) => a.frame - b.frame);
+        }
+      }
+    }
+
+    // 4) Sync speech audio / TTS cues with Talk/Yell & sync explosion/shock SFX with reactions
+    const isActorMovingAt = (ap: NonNullable<AiMoviePlan['scenes'][number]['actors']>[number], frame: number) => {
+      const kfs = ap.keyframes || [];
+      for (let i = 0; i < kfs.length - 1; i++) {
+        if (frame >= kfs[i].frame && frame < kfs[i + 1].frame) {
+          if (Math.hypot(kfs[i + 1].x - kfs[i].x, kfs[i + 1].z - kfs[i].z) > 0.6) return true;
+        }
+      }
+      return false;
+    };
+
+    for (let sE = 0; sE < speechEvents.length; sE++) {
+      const ev = speechEvents[sE];
+      let targetIdx = -1;
+      if (ev.speaker) {
+        const spkLow = ev.speaker.trim().toLowerCase();
+        targetIdx = actors.findIndex(
+          (a) =>
+            (a.customName || '').toLowerCase().includes(spkLow) ||
+            a.name.toLowerCase().includes(spkLow) ||
+            spkLow.includes(a.name.toLowerCase())
+        );
+      }
+      if (targetIdx < 0) targetIdx = sE % actors.length;
+      const targetActor = actors[targetIdx];
+      if (!targetActor || isActorMovingAt(targetActor, ev.frame)) continue;
+
+      const segs = (targetActor.actionSegments = targetActor.actionSegments || []);
+      const talkAct = ev.isYell ? 'Yell' : 'Talk';
+      const existingAtEv = segs.find((s) => Math.abs(s.frame - ev.frame) <= 2);
+      if (existingAtEv) {
+        if (!isLocomotionActionName(existingAtEv.actionName)) {
+          existingAtEv.actionName = talkAct;
+        }
+      } else {
+        segs.push({ frame: ev.frame, actionName: talkAct });
+      }
+      const restAt = Math.min(totalFrames - 1, ev.frame + 10);
+      if (
+        restAt > ev.frame + 5 &&
+        !segs.some((s) => s.frame > ev.frame && s.frame <= restAt + 2) &&
+        !isActorMovingAt(targetActor, restAt)
+      ) {
+        segs.push({ frame: restAt, actionName: 'At Rest' });
+      }
+      segs.sort((a, b) => a.frame - b.frame);
+    }
+
+    for (let rIdx = 0; rIdx < shockFrames.length; rIdx++) {
+      const rf = Math.min(totalFrames - 4, shockFrames[rIdx] + 1);
+      const reactor = actors[(rIdx + (actors.length > 1 ? 1 : 0)) % actors.length];
+      if (!reactor || isActorMovingAt(reactor, rf)) continue;
+      const segs = (reactor.actionSegments = reactor.actionSegments || []);
+      const reactAct = rIdx % 2 === 0 ? 'Jump' : 'Faint';
+      if (!segs.some((s) => Math.abs(s.frame - rf) <= 2)) {
+        segs.push({ frame: rf, actionName: reactAct });
+        const settleF = Math.min(totalFrames - 1, rf + 9);
+        if (settleF > rf + 4 && !segs.some((s) => s.frame > rf && s.frame <= settleF + 2)) {
+          segs.push({ frame: settleF, actionName: 'At Rest' });
+        }
+        segs.sort((a, b) => a.frame - b.frame);
+      }
+    }
+  }
+}
+
 async function requestAiMoviePlan(
   prompt: string,
   catalogSummary: CatalogSummaryPayload,
@@ -1156,6 +1559,7 @@ export async function generateAiMovie(options: {
   const plan = await requestAiMoviePlan(prompt, catalogSummary, directorName);
   const rawScenes = plan.scenes || [];
   diversifyAiMovieBlocking(rawScenes, prompt);
+  refineTrained3dmmChoreography(rawScenes, prompt, catalog.scenes, soundCatalog);
 
   // Intercept any ttsVoices lines that already exist in SOUND.3TH SVTH or .3MM sample movies so real recorded voices play instead of TTS!
   for (const sp of rawScenes) {
@@ -1539,27 +1943,34 @@ export async function generateAiMovie(options: {
             tmpl?.actions.find((a) => /at rest/i.test(a.name)) ||
             tmpl?.actions[0] || { anid: 0, name: 'At Rest' };
 
-          // Clear delayed "At Rest" or lingering locomotion actions inside the stationary window (stopFrame, stopLimit)
+          const isHorizLoco = (nm: string) =>
+            /walk|run|sneak|crawl/i.test(nm) || (/fly/i.test(nm) && yPos <= 1.2);
+
+          const curAtStop = resolveActionNameAtFrame(akfs, stopFrame);
+          const hoveringInAir = /fly/i.test(curAtStop) && yPos > 1.2;
+          if (/walk|run|sneak|crawl|fly/i.test(curAtStop) && !hoveringInAir) {
+            akfs[stopFrame] = { anid: restAct.anid, actionName: restAct.name };
+          }
+
+          // Clear lingering ground locomotion inside the stationary window (stopFrame, stopLimit),
+          // and clear delayed "At Rest" ONLY if no expressive acting beat ran before it.
           const stopLimit = nextMoveFrame ?? totalFrames + 1;
-          for (const fkStr of Object.keys(akfs)) {
+          for (const fkStr of Object.keys(akfs)
+            .map(Number)
+            .sort((a, b) => a - b)
+            .map(String)) {
             const fk = Number(fkStr);
             if (fk > stopFrame && fk < stopLimit) {
               const nm = akfs[fk].actionName.trim();
-              if (
-                /^at rest$/i.test(nm) ||
-                (/walk|run|sneak|crawl|jump|hop/i.test(nm) && !(/fly/i.test(nm) && yPos > 1.2))
-              ) {
+              if (isHorizLoco(nm)) {
                 delete akfs[fk];
+              } else if (/^at rest$/i.test(nm)) {
+                const prevNm = resolveActionNameAtFrame(akfs, fk - 1);
+                if (/walk|run|sneak|crawl|fly|^at rest$/i.test(prevNm)) {
+                  delete akfs[fk];
+                }
               }
             }
-          }
-
-          const curAtStop = resolveActionNameAtFrame(akfs, stopFrame);
-          const isLocomotion = /walk|run|sneak|crawl|fly|jump|hop/i.test(curAtStop);
-          // Switch to At Rest at stopFrame whenever locomotion was running (unless flying high in air)
-          const hoveringInAir = /fly/i.test(curAtStop) && yPos > 1.2;
-          if (isLocomotion && !hoveringInAir) {
-            akfs[stopFrame] = { anid: restAct.anid, actionName: restAct.name };
           }
         },
         onEnsureStationaryRest: (f0, f1, yPos) => {
@@ -1567,16 +1978,17 @@ export async function generateAiMovie(options: {
             tmpl?.actions.find((a) => /^at rest$/i.test(a.name.trim())) ||
             tmpl?.actions.find((a) => /at rest/i.test(a.name)) ||
             tmpl?.actions[0] || { anid: 0, name: 'At Rest' };
+          const isHorizLoco = (nm: string) =>
+            /walk|run|sneak|crawl/i.test(nm) || (/fly/i.test(nm) && yPos <= 1.2);
           const curAtStart = resolveActionNameAtFrame(akfs, f0);
-          const hoveringInAir = /fly/i.test(curAtStart) && yPos > 1.2;
-          if (/walk|run|sneak|crawl|fly|jump|hop/i.test(curAtStart) && !hoveringInAir) {
+          if (isHorizLoco(curAtStart)) {
             akfs[f0] = { anid: restAct.anid, actionName: restAct.name };
           }
           for (const fkStr of Object.keys(akfs)) {
             const fk = Number(fkStr);
             if (fk > f0 && fk < f1) {
               const nm = akfs[fk].actionName.trim();
-              if (/walk|run|sneak|crawl|jump|hop/i.test(nm) && !(/fly/i.test(nm) && yPos > 1.2)) {
+              if (isHorizLoco(nm)) {
                 akfs[fk] = { anid: restAct.anid, actionName: restAct.name };
               }
             }

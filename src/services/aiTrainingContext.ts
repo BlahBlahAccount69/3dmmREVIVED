@@ -291,13 +291,13 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
     properties: {
       frame: {
         type: 'INTEGER',
-        description: 'Frame index at 6 FPS (6f = 1s). For crisp non-snail moves across stage, space move start->end 5-16 frames apart (~1.2-3.5 units/frame), not 0->60f.',
+        description: 'Frame index at 6 FPS (6f = 1s). Corpus timing: crisp locomotion legs take 6-15 frames (~0.45-1.2 units/frame) with explicit stop frames—never stretch one walk from 0 to sceneEnd.',
       },
       x: { type: 'NUMBER' },
       y: { type: 'NUMBER' },
       z: { type: 'NUMBER' },
       rotX: { type: 'NUMBER', description: 'Optional tilt/pitch rotation in radians.' },
-      rotY: { type: 'NUMBER', description: 'Yaw in radians: atan2(dx,dz) along move, +1.57=right, -1.57=left, 3.14=away, 0=camera. Face partners during dialogue instead of always 0!' },
+      rotY: { type: 'NUMBER', description: 'Yaw in radians: atan2(dx,dz) during travel, then face dialogue partner or focal prop upon stopping (never leave cast frozen at rotY=0!).' },
       rotZ: { type: 'NUMBER', description: 'Optional roll rotation in radians.' },
       scale: { type: 'NUMBER', description: 'Optional uniform scale multiplier (0.04 to 10.0).' },
       scaleX: { type: 'NUMBER', description: 'Optional non-uniform width stretch/squash (0.04 to 10.0).' },
@@ -326,7 +326,7 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
             sceneName: { type: 'STRING' },
             durationFrames: {
               type: 'INTEGER',
-              description: 'Scene length in frames at 6 FPS (short 18-30f, normal 42-72f, long 84-180f).',
+              description: 'Scene length in frames at 6 FPS (corpus median ~42f; quick beats 18-30f, normal dialogue/action 36-78f, climax 66-140f).',
             },
             transition: {
               type: 'STRING',
@@ -334,6 +334,7 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
             },
             cameraCuts: {
               type: 'ARRAY',
+              description: 'REQUIRED multi-cut pacing trained from 3DMM movies: include 2-5 cameraCuts on scenes >=30f (cut every 10-22 frames across valid viewIndex 0..viewCount-1, starting at frame 0; use 1 cut only on very short <24f shots or single-color GE-Black shots).',
               items: {
                 type: 'OBJECT',
                 properties: {
@@ -362,7 +363,7 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
                   endFrame: { type: 'INTEGER', description: 'Optional frame when actor exits/vanishes from stage.' },
                   actionSegments: {
                     type: 'ARRAY',
-                    description: 'Must align frame-for-frame with keyframes: start locomotion at move start frame fA, switch ONLY at arrival frame fB (never At Rest mid-move!).',
+                    description: 'REQUIRED multi-beat acting (3-6+ distinct action switches per active actor, changing every 6-18f): start travel locomotion (Walk Fast/Run/Fly/Sneak) at move depart, switch at stop into expressive beats (Greet -> Talk/Laugh/Think/Jump/Faint -> At Rest), sync Talk with dialogue/voices, and never leave stationary actors stuck in a single At Rest!',
                     items: {
                       type: 'OBJECT',
                       properties: {
@@ -374,7 +375,7 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
                   },
                   keyframes: {
                     type: 'ARRAY',
-                    description: 'Vary choreography: stationary dialogue facing partner, right->left, back->front z-approaches, diagonals, retreats, Fly arcs. Never repeat left->right stop->face-front!',
+                    description: 'Corpus-trained blocking: stagger departure/arrival frames, separate large casts across foreground/midground/background Z depths without overlapping at (0,0,0), vary directions (diagonals, R->L, Z-approaches, Fly arcs), and turn to face partners after arriving.',
                     items: keyframeItemSchema,
                   },
                 },
@@ -403,6 +404,7 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
                   endFrame: { type: 'INTEGER', description: 'Optional frame when prop disappears.' },
                   actionSegments: {
                     type: 'ARRAY',
+                    description: 'Animate hero props: use Bang!/Grow Fast on Explosio, Fly on Rocket, Open and Close on Safe/Chest/Coffin, Spin/Grow/Stretch on active props.',
                     items: {
                       type: 'OBJECT',
                       properties: {
