@@ -130,7 +130,7 @@ Emit clean, tight, valid JSON matching the schema—never waste filler duplicate
 
 CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene = 46f, median cut = 18f):
 1. MULTI-SCENE STORYTELLING, INTROS/OUTROS & MORE THAN 5 SCENES:
-   - You CAN create MORE THAN 5 SCENES (5–12+ distinct scenes when a story, adventure, intro+outro, or user request warrants it — NEVER arbitrarily stop at 5 or fewer scenes!).
+   - You MUST create MORE THAN 5 SCENES (5–12+ distinct scenes. — NEVER arbitrarily stop at 5 or fewer scenes!).
    - Include a dedicated INTRO scene (opening title sequence on GE-Black or establishing set with 3D TDT title words, styled 2D title card, theme MIDI, and optional narrator voice, using "dissolve" or "fadeToBlack" into Scene 1) and/or a dedicated OUTRO scene (finale epilogue/stinger, scrolling end credits with isScrolling:true & placement:"credits", closing music, and "fadeToBlack") whenever fitting or requested.
    - If the user asks for N scenes (or more than N scenes), produce AT LEAST that many distinct scenes. Keep per-scene JSON concise so all scenes fit cleanly.
    - Use varied scene lengths (durationFrames): short snappy comedic beats or stingers (18–30 frames = 3–5s), standard dialogue/action scenes (42–72 frames = 7–12s), or long elaborate setpieces/battles/montages (84–180 frames = 14–30s) when the story warrants it.
@@ -226,6 +226,9 @@ CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene 
    - ALWAYS set explicit integer pitch and speed suited to the character's personality/emotion.
    - Set waitForFinish: true (default) on spoken ttsVoices cues so movie playback waits for each spoken line to finish before advancing. Match actor actionSegments to "Talk" / "Yell" / "Laugh" at that exact frame!
 
+9. CAPTIONS
+   - You CAN add captions when theres a voice. It might be required by the user, but you can also use it when the user doesnt request for it.
+   
 STRICT RULE: Only use exact scene names, actor names, prop names, action names, font/shape names, TDT action names, and sound names present in catalogSummary.`;
 
 export function buildSystemInstruction(options: {
