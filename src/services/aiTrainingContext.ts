@@ -229,6 +229,8 @@ CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene 
 9. CAPTIONS
    - You CAN add captions when theres a voice. It might be required by the user, but you can also use it when the user doesnt request for it.
 
+10. ACTORS
+   -You better put more than 3 actors (12 or more is better) in one scene. i dont mean ypu have to put half of actors in each scene, i mean you have to put the exact number of actors in scenes without halfing it for other scenes. 
 STRICT RULE: Only use exact scene names, actor names, prop names, action names, font/shape names, TDT action names, and sound names present in catalogSummary.`;
 
 export function buildSystemInstruction(options: {
