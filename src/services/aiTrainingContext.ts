@@ -257,7 +257,7 @@ export function buildSystemInstruction(options: {
   const sceneConstraintNote =
     requestedSceneCount !== null
       ? `\n\nMANDATORY SCENE COUNT: The user explicitly asked for at least ${requestedSceneCount} scenes. Your JSON output MUST contain at least ${requestedSceneCount} distinct scenes in "scenes". Never merge scenes below ${requestedSceneCount}.`
-      : `\n\nMULTI-SCENE TARGET: Generate 5 to 10+ rich, distinct scenes (including an Intro title scene and Outro/credits scene when appropriate — do NOT stop at 5 or fewer scenes if the story needs more).`;
+      : `\n\nMULTI-SCENE TARGET: Generate 7 to 12+ rich, distinct scenes (strictly MORE THAN 6 SCENES, including an Intro title scene and Outro/credits scene when appropriate — do NOT stop at 5 or 6 scenes!).`;
 
   const actorConstraintNote =
     requestedActorCount !== null
@@ -284,7 +284,7 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
   const sceneDesc =
     requestedSceneCount !== null
       ? `MUST contain at least ${requestedSceneCount} distinct scenes in story order (${requestedSceneCount}+ scenes requested, plus optional intro/outro). Never merge or drop scenes below ${requestedSceneCount}.`
-      : '5 to 12 distinct scenes in story order (feel free to exceed 5 scenes: optional dedicated Intro scene, multi-scene adventure progression, climax, and Outro/End Credits scene).';
+      : '7 to 12 distinct scenes in story order (strictly MORE THAN 6 SCENES: optional dedicated Intro scene, multi-scene adventure progression, climax, and Outro/End Credits scene).';
 
   const keyframeItemSchema = {
     type: 'OBJECT',
@@ -485,12 +485,12 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
             },
             audioCues: {
               type: 'ARRAY',
-              description: 'Place SFX, custom .3MM audio, or MIDI music cues at specific frames (e.g. frame 0 for opening MIDI, AND later frames like frame 22 to switch MIDI mid-scene or trigger an impact SFX right on the action beat!).',
+              description: 'REQUIRED in every scene: place MIDI music from catalogSummary.sounds (isMidi:true, including MIDIs used in other .3MM movies, switching tracks mid-scene on dramatic beats), SFX from other .3MM movies & catalogSummary.sounds, AND existing recorded voices from .3MM movies & 3DMM sample speech clips (category:"speech")! Check catalogSummary.sounds FIRST for matching voices/SFX/MIDIs — NEVER re-synthesize existing sample or movie voices with ttsVoices!',
               items: {
                 type: 'OBJECT',
                 properties: {
                   frame: { type: 'INTEGER', description: 'Exact scene frame (0..durationFrames) to start/switch this MIDI or play this SFX/speech clip.' },
-                  soundName: { type: 'STRING' },
+                  soundName: { type: 'STRING', description: 'Exact sound name from catalogSummary.sounds (e.g. a MIDI track, .3MM movie SFX, or existing .3MM/sample voice line).' },
                   loop: { type: 'BOOLEAN' },
                 },
                 required: ['frame', 'soundName'],
@@ -498,7 +498,7 @@ export function buildGeminiMoviePlanSchema(requestedSceneCount: number | null) {
             },
             ttsVoices: {
               type: 'ARRAY',
-              description: 'Spoken character dialogue / narration synthesized at specific scene frames with varied SAPI4 voices (Sam, Mike, Mary, Adult Female #1/#2, Adult Male #1..#8), character pitch & speed, and waitForFinish.',
+              description: 'ONLY for brand-new spoken dialogue lines whose wording does NOT already exist in catalogSummary.sounds (category:"speech"). If an existing sample or other-movie voice clip fits (such as "Follow me!", "Get Him!", "Stop! Not so fast", "Wait up, Wanda!", "Oh no! A rat!", "Surprise", "Whoa!", "Aaahhh!!", "Nooo!", "What?", "Yipee (Custom)"), put it in audioCues instead—NEVER put existing sample/movie voices into ttsVoices!',
               items: {
                 type: 'OBJECT',
                 properties: {

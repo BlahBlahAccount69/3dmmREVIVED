@@ -655,6 +655,131 @@ function rectForPlacement(placement?: string, isScrolling?: boolean) {
   return { left: 32, top: 224, right: 512, bottom: 294 };
 }
 
+const SAMPLE_MOVIE_AUDIO_SOURCES: Record<string, string> = {
+  'ghoul evil theme': 'BONGO.3MM / HOSPITAL.3MM',
+  'deep chasm 1': 'BOOOOOO.3MM',
+  'deep chasm 2': 'BOOOOOO.3MM / SPROG.3MM',
+  'boooooo!!': 'BOOOOOO.3MM (Sample Voice)',
+  'bistro evil theme': 'CITYTOUR.3MM / SPROG.3MM',
+  'howdy good theme': 'DIALOGUE.3MM',
+  'search evil part2': 'GRAVEYRD.3MM',
+  'search evil part3': 'GRAVEYRD.3MM',
+  'ending evil 9': 'GRAVEYRD.3MM',
+  'specter evil theme': 'HAUNTED.3MM / THEBOOK.3MM',
+  'wraith evil theme': 'HAUNTED.3MM / HOSPITAL.3MM',
+  'mystery evil theme': 'JOG.3MM / THETHIEF.3MM',
+  'mystery evil part2': 'HOSPITAL.3MM',
+  'spirit evil theme': 'HOSPITAL.3MM',
+  "hero's coming": 'HOSPITAL.3MM / VENUS31.3MM',
+  'safari evil theme': 'JUNGLE.3MM / SPACE.3MM',
+  'sleuth evil theme': 'MESSAGE.3MM',
+  'villain wins': 'MESSAGE.3MM / THETHIEF.3MM',
+  'imaginopolis theme': 'MESSAGE.3MM',
+  'jungle chase': 'MESSAGE.3MM / TERROR.3MM',
+  'tense1': 'MUMMY.3MM',
+  'tense2': 'MUMMY.3MM',
+  'hurry 1': 'MUMMY.3MM',
+  'hurry 2': 'VENUS31.3MM',
+  'quest good theme': 'SPACE.3MM / TERROR.3MM',
+  'dream good theme': 'SPROG.3MM',
+  'search evil theme': 'SPROG.3MM',
+  'search good theme': 'VENUS31.3MM',
+  'victory moment 1': 'VENUS31.3MM',
+  'victory moment 2': 'SPROG.3MM',
+  'short happy end': 'SPROG.3MM',
+  'happy ending': 'THETHIEF.3MM / WHERE.3MM',
+  'geist evil theme': 'TERROR.3MM',
+  'sudden fright': 'TERROR.3MM / THEBOOK.3MM',
+  'run away 1': 'TERROR.3MM / VENUS31.3MM',
+  'stress chase': 'TERROR.3MM / THETHIEF.3MM',
+  'sudden scare': 'TERROR.3MM',
+  'funny moment 1': 'TERROR.3MM',
+  'clue hunt 1': 'THEBOOK.3MM',
+  'sneaking 2': 'THEBOOK.3MM',
+  'attack': 'THEBOOK.3MM / THETHIEF.3MM',
+  'triumph': 'THETHIEF.3MM',
+  'battle ending': 'VENUS31.3MM',
+  'heroic ending': 'VENUS31.3MM',
+  'prepare & attack': 'VENUS31.3MM',
+  'sudden tension': 'VENUS31.3MM',
+  'explosion big': 'VENUS31.3MM',
+  'rocket launch': 'VENUS31.3MM',
+  'explode mortar': 'VENUS31.3MM',
+  'owl hoot': 'GRAVEYRD.3MM / HAUNTED.3MM',
+  'wolf howl': 'HAUNTED.3MM',
+  'laugh maniac': 'HAUNTED.3MM / MESSAGE.3MM',
+  'laugh insane': 'HAUNTED.3MM',
+  'monster cry': 'HAUNTED.3MM / THEBOOK.3MM',
+  'thunder crash': 'JOG.3MM',
+  'thunder long': 'TERROR.3MM',
+  'siren end': 'HOSPITAL.3MM',
+  'door big open': 'HOSPITAL.3MM / THEBOOK.3MM',
+  'crash blocks big': 'HOSPITAL.3MM',
+  'punch echo': 'SPACE.3MM',
+  'creak extralong': 'MUMMY.3MM',
+};
+
+function getSoundSourceLabel(item: CatalogSoundItem): string | undefined {
+  if (item.sourceLabel) return item.sourceLabel;
+  const known = SAMPLE_MOVIE_AUDIO_SOURCES[item.name.trim().toLowerCase()];
+  if (known) return known;
+  if (item.category === 'speech') return '3DMM Sample Voice (SVTH)';
+  return undefined;
+}
+
+function normalizeVoiceText(raw: string): string {
+  return (raw || '')
+    .toLowerCase()
+    .replace(/\((?:custom|echo|short)\)/gi, ' ')
+    .replace(/\.\.\./g, ' ')
+    .replace(/[^a-z0-9\s']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findMatchingExistingVoice(
+  spokenText: string,
+  soundCatalog: CatalogSoundItem[]
+): CatalogSoundItem | null {
+  const normInput = normalizeVoiceText(spokenText);
+  if (normInput.length < 3) return null;
+
+  const voicePool = soundCatalog.filter(
+    (s) => s.category === 'speech' || (Boolean(s.sampleFile) && !s.isMidi && s.category !== 'music')
+  );
+
+  let best: CatalogSoundItem | null = null;
+  let bestScore = 0;
+
+  for (const item of voicePool) {
+    const rawName = item.name.trim();
+    const isEllipsis = rawName.includes('...');
+    const normItem = normalizeVoiceText(rawName);
+    if (normItem.length < 3) continue;
+
+    if (normItem === normInput) {
+      return item;
+    }
+
+    let score = 0;
+    if (isEllipsis && normItem.length >= 5 && normInput.startsWith(normItem)) {
+      score = 90 + normItem.length;
+    } else if (normInput.includes(normItem) && normItem.length >= 6 && normInput.length <= normItem.length * 1.9) {
+      score = 65 + normItem.length;
+    } else if (normItem.includes(normInput) && normInput.length >= 6 && normItem.length <= normInput.length * 1.9) {
+      score = 60 + normInput.length;
+    }
+
+    if (item.sampleFile) score += 2;
+    if (score > bestScore) {
+      bestScore = score;
+      best = item;
+    }
+  }
+
+  return bestScore >= 65 ? best : null;
+}
+
 function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): CatalogSoundItem[] {
   const promptTokens = (prompt || '')
     .toLowerCase()
@@ -664,10 +789,10 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
   const pickCategory = (category: 'music' | 'sfx' | 'speech', pattern: RegExp, limit: number) => {
     const pool = soundCatalog.filter((s) => s.category === category);
     const customFirst = pool
-      .filter((item) => Boolean(item.sampleFile || item.midiFileUrl))
+      .filter((item) => Boolean(item.sampleFile || item.midiFileUrl || SAMPLE_MOVIE_AUDIO_SOURCES[item.name.trim().toLowerCase()]))
       .map((item) => {
-        const hay = `${item.name} ${item.sourceLabel || ''}`.toLowerCase();
-        let score = 4;
+        const hay = `${item.name} ${getSoundSourceLabel(item) || ''}`.toLowerCase();
+        let score = item.sampleFile || item.midiFileUrl ? 8 : 5;
         if (pattern.test(item.name)) score += 3;
         for (const tok of promptTokens) {
           if (hay.includes(tok)) score += 6;
@@ -678,14 +803,14 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
 
     const scored = pool
       .map((item) => {
-        const hay = `${item.name} ${item.sourceLabel || ''}`.toLowerCase();
+        const hay = `${item.name} ${getSoundSourceLabel(item) || ''}`.toLowerCase();
         let score = 0;
-        if (item.midiFileUrl || item.sampleFile) score += 5;
+        if (item.midiFileUrl || item.sampleFile) score += 7;
+        if (SAMPLE_MOVIE_AUDIO_SOURCES[item.name.trim().toLowerCase()]) score += 4;
         if (pattern.test(item.name)) score += 3;
         for (const tok of promptTokens) {
           if (hay.includes(tok)) score += 6;
         }
-        // Subtle deterministic rotation across non-top items so trained-movie MIDI/SFX variety changes per prompt
         const hash = ((item.cno * 2654435761) >>> 0) % 100;
         return { item, score, hash };
       })
@@ -693,7 +818,25 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
 
     const merged: CatalogSoundItem[] = [];
     const seen = new Set<number>();
-    const customQuota = category === 'sfx' ? 8 : category === 'speech' ? 12 : 6;
+
+    // For speech, include ALL 29 SVTH sample voices + ALL custom .3MM voices so AI never needs TTS for existing lines!
+    if (category === 'speech') {
+      for (const { item } of customFirst) {
+        if (!seen.has(item.cno)) {
+          seen.add(item.cno);
+          merged.push(item);
+        }
+      }
+      for (const { item } of scored) {
+        if (!seen.has(item.cno)) {
+          seen.add(item.cno);
+          merged.push(item);
+        }
+      }
+      return merged;
+    }
+
+    const customQuota = category === 'sfx' ? 28 : 34;
     for (const { item } of customFirst.slice(0, customQuota)) {
       if (seen.has(item.cno)) continue;
       seen.add(item.cno);
@@ -709,9 +852,9 @@ function pickCuratedSounds(prompt: string, soundCatalog: CatalogSoundItem[]): Ca
   };
 
   return [
-    ...pickCategory('music', SIGNATURE_SOUND_PATTERNS[0], 40),
-    ...pickCategory('sfx', SIGNATURE_SOUND_PATTERNS[1], 36),
-    ...pickCategory('speech', SIGNATURE_SOUND_PATTERNS[2], 32),
+    ...pickCategory('music', SIGNATURE_SOUND_PATTERNS[0], 55),
+    ...pickCategory('sfx', SIGNATURE_SOUND_PATTERNS[1], 50),
+    ...pickCategory('speech', SIGNATURE_SOUND_PATTERNS[2], 80),
   ];
 }
 
@@ -999,17 +1142,102 @@ export async function generateAiMovie(options: {
     tdtActions: [...TDT_ACTIONS],
     fonts2d: FONT_2D_LIST,
     transitions: ['cut', 'dissolve', 'fadeToBlack', 'fadeToWhite'],
-    sounds: pickedSounds.map((s) => ({
-      name: s.name,
-      category: s.category,
-      ...(s.sourceLabel ? { sourceLabel: s.sourceLabel } : {}),
-      ...(s.isMidi ? { isMidi: true } : {}),
-    })),
+    sounds: pickedSounds.map((s) => {
+      const label = getSoundSourceLabel(s);
+      return {
+        name: s.name,
+        category: s.category,
+        ...(label ? { sourceLabel: label } : {}),
+        ...(s.isMidi ? { isMidi: true } : {}),
+      };
+    }),
   };
 
   const plan = await requestAiMoviePlan(prompt, catalogSummary, directorName);
   const rawScenes = plan.scenes || [];
   diversifyAiMovieBlocking(rawScenes, prompt);
+
+  // Intercept any ttsVoices lines that already exist in SOUND.3TH SVTH or .3MM sample movies so real recorded voices play instead of TTS!
+  for (const sp of rawScenes) {
+    if (!Array.isArray(sp.ttsVoices) || sp.ttsVoices.length === 0) continue;
+    const keptTts: NonNullable<typeof sp.ttsVoices> = [];
+    const audioList = (sp.audioCues = sp.audioCues || []);
+    for (const vp of sp.ttsVoices) {
+      const existingMatch = findMatchingExistingVoice(vp.text || '', soundCatalog);
+      if (existingMatch) {
+        const f = Math.round(clamp(vp.frame ?? 0, 0, Math.max(12, sp.durationFrames || 54)));
+        if (!audioList.some((ac) => ac.frame === f && ac.soundName.toLowerCase() === existingMatch.name.toLowerCase())) {
+          audioList.push({ frame: f, soundName: existingMatch.name, loop: false });
+        }
+      } else {
+        keptTts.push(vp);
+      }
+    }
+    sp.ttsVoices = keptTts;
+  }
+
+  // Ensure every generated movie actively incorporates real MIDIs & SFX/voices from other .3MM movies (without repeating 1 MIDI everywhere)
+  const midiPool = pickedSounds.filter(
+    (s) => s.category === 'music' && Boolean(SAMPLE_MOVIE_AUDIO_SOURCES[s.name.trim().toLowerCase()] || s.midiFileUrl)
+  );
+  const fallbackMidiPool = midiPool.length > 0 ? midiPool : pickedSounds.filter((s) => s.category === 'music');
+  const sfxCustomPool = pickedSounds.filter((s) => s.category === 'sfx' && Boolean(s.sampleFile || SAMPLE_MOVIE_AUDIO_SOURCES[s.name.trim().toLowerCase()]));
+
+  let customMovieSfxUsed = 0;
+  let lastSceneMidiName = '';
+  for (let sIdx = 0; sIdx < rawScenes.length; sIdx++) {
+    const sp = rawScenes[sIdx];
+    const audioList = (sp.audioCues = sp.audioCues || []);
+    const midiCues = audioList.filter((ac) => {
+      const low = (ac.soundName || '').trim().toLowerCase();
+      return soundCatalog.some((s) => s.category === 'music' && s.name.toLowerCase() === low);
+    });
+    for (const ac of audioList) {
+      const low = (ac.soundName || '').trim().toLowerCase();
+      const hit = soundCatalog.find((s) => s.name.toLowerCase() === low);
+      if (hit && hit.category !== 'music' && (hit.sampleFile || SAMPLE_MOVIE_AUDIO_SOURCES[low])) {
+        customMovieSfxUsed++;
+      }
+    }
+
+    if (midiCues.length === 0 && fallbackMidiPool.length > 0) {
+      const chosenMidi =
+        sIdx === rawScenes.length - 1
+          ? fallbackMidiPool.find((m) => /happy end|triumph|heroic|victory/i.test(m.name)) ||
+            fallbackMidiPool[(sIdx * 3) % fallbackMidiPool.length]
+          : fallbackMidiPool[(sIdx * 3) % fallbackMidiPool.length];
+      if (chosenMidi) {
+        audioList.push({ frame: 0, soundName: chosenMidi.name, loop: true });
+        lastSceneMidiName = chosenMidi.name.toLowerCase();
+      }
+    } else if (midiCues.length > 0) {
+      const firstMidi = midiCues[0].soundName.trim().toLowerCase();
+      if (firstMidi === lastSceneMidiName && fallbackMidiPool.length > 1 && sIdx > 0) {
+        const alt =
+          fallbackMidiPool.find((m) => m.name.toLowerCase() !== firstMidi) || fallbackMidiPool[0];
+        if (alt) {
+          midiCues[0].soundName = alt.name;
+          lastSceneMidiName = alt.name.toLowerCase();
+        }
+      } else {
+        lastSceneMidiName = firstMidi;
+      }
+    }
+  }
+
+  // If the AI produced zero SFX from other .3MM movies across the scenes, place fitting .3MM SFX on action scenes
+  if (customMovieSfxUsed === 0 && sfxCustomPool.length > 0) {
+    const targetScenes = rawScenes.slice(1, Math.max(2, rawScenes.length - 1));
+    targetScenes.slice(0, 3).forEach((sp, idx) => {
+      const audioList = (sp.audioCues = sp.audioCues || []);
+      const dur = Math.max(18, sp.durationFrames || 48);
+      const beatFrame = Math.min(dur - 2, Math.max(4, Math.round(dur * 0.45)));
+      const sfx = sfxCustomPool[(idx * 2) % sfxCustomPool.length];
+      if (sfx) {
+        audioList.push({ frame: beatFrame, soundName: sfx.name, loop: false });
+      }
+    });
+  }
 
   // Parallel pre-hydration of TDT swatches, unique TMPLS.3CN templates, and all matched sounds (SNDS, .3MM custom)
   const matchedActorsMap = new Map<string, CatalogActorItem>();

@@ -129,9 +129,13 @@ function selectCompactTrainingExemplars(prompt: string, targetSceneCount: number
       else if (movie.rating !== null && movie.rating <= 3) score -= 4;
 
       if (movie.source === 'official') score += 3;
-      if (movie.sceneCount >= Math.max(4, targetSceneCount - 2)) score += 4;
+      if (movie.sceneCount >= Math.max(6, targetSceneCount - 1)) score += 5;
       if (movie.hasScrollingCredits) score += 1;
       if (movie.tdtCount > 0) score += 1;
+      const hasRichKfs = (movie.highlights || []).some((h) =>
+        (h.actors || []).some((a) => (a.kfs?.length || 0) >= 2)
+      );
+      if (hasRichKfs) score += 4;
 
       const haystack = [
         movie.title,
@@ -144,7 +148,7 @@ function selectCompactTrainingExemplars(prompt: string, targetSceneCount: number
         .toLowerCase();
 
       for (const tok of tokens) {
-        if (haystack.includes(tok)) score += 5;
+        if (haystack.includes(tok)) score += 6;
       }
 
       return { movie, score };
@@ -153,55 +157,83 @@ function selectCompactTrainingExemplars(prompt: string, targetSceneCount: number
 
   const chosen: TrainingMovieRecord[] = [];
   const seenTitles = new Set<string>();
+
+  // Always ensure Enriched Enlightenment + top community & official exemplars contribute animation patterns
+  const eeMovie = TRAINING_CORPUS.movies.find((m) => /enriched enlightenment/i.test(m.title));
+  if (eeMovie) {
+    seenTitles.add(eeMovie.title.replace(/\s*\([^)]*\)\s*/g, '').toLowerCase());
+    chosen.push(eeMovie);
+  }
+
   for (const item of scored) {
     const baseTitle = item.movie.title.replace(/\s*\([^)]*\)\s*/g, '').toLowerCase();
     if (seenTitles.has(baseTitle)) continue;
     seenTitles.add(baseTitle);
     chosen.push(item.movie);
-    if (chosen.length >= 3) break;
+    if (chosen.length >= 6) break;
   }
 
   if (chosen.length === 0) return '';
 
   const lines: string[] = [];
   for (const m of chosen) {
-    const hs = (m.highlights || []).slice(0, 4);
-    const arc = hs.map((h) => `${h.sceneName}(${h.frames}f)`).join(' -> ');
-    const lead = hs.find((h) => (h.actors?.length || 0) > 0) || hs[0];
-    const leadActors = (lead?.actors || [])
+    const hs = m.highlights || [];
+    const arc = hs
+      .slice(0, 5)
+      .map((h) => `${h.sceneName}(${h.frames}f)`)
+      .join(' -> ');
+
+    // Pick highlight scene with richest animation keyframes + action chains
+    const animHighlight =
+      hs.find((h) => (h.actors || []).some((a) => (a.kfs?.length || 0) >= 2 && (a.actions?.length || 0) >= 2)) ||
+      hs.find((h) => (h.actors || []).some((a) => (a.kfs?.length || 0) >= 2)) ||
+      hs.find((h) => (h.actors?.length || 0) > 0) ||
+      hs[0];
+
+    const cutPattern = (animHighlight?.cuts || [])
+      .slice(0, 5)
+      .map((c) => `f${c.f}->v${c.v}`)
+      .join(', ');
+
+    const actorBlocking = (animHighlight?.actors || [])
+      .slice(0, 3)
+      .map((a) => {
+        const acts = (a.actions || []).slice(0, 4).join(' -> ');
+        const kfsStr = (a.kfs || [])
+          .slice(0, 3)
+          .map((k) => `f${k.f}(${k.x},${k.y},${k.z},rotY:${k.rotY})`)
+          .join('->');
+        return `${a.name}[${acts || 'At Rest'}]${kfsStr ? ` path=${kfsStr}` : ''}`;
+      })
+      .join(' | ');
+
+    const propSummary = (animHighlight?.props || [])
+      .filter((p) => p.name && p.name !== 'CustomProp')
       .slice(0, 4)
-      .map((a) => `${a.name}[${(a.actions || []).slice(0, 2).join(',')}]`)
+      .map((p) => `${p.name}${p.actions?.length ? `[${p.actions.slice(0, 2).join(',')}]` : ''}`)
       .join(', ');
-    const leadProps = (lead?.props || [])
-      .slice(0, 4)
-      .map((p) => p.name)
-      .join(', ');
-    const leadTdt = (lead?.tdts || [])
-      .slice(0, 2)
-      .map((t) => `"${t.text}"(${t.action})`)
-      .join(', ');
-    const leadAudio = Array.from(
+
+    const audioTiming = Array.from(
       new Set(
-        hs.flatMap((h) => h.audio || h.sounds || [])
-          .map((raw) => {
-            const idx = raw.indexOf(':');
-            return (idx >= 0 ? raw.slice(idx + 1) : raw).trim();
-          })
+        hs
+          .flatMap((h) => h.audio || h.sounds || [])
+          .map((raw) => raw.trim())
           .filter((name) => Boolean(name) && !/\.(mp3|mp4)/i.test(name))
       )
     )
-      .slice(0, 4)
+      .slice(0, 6)
       .join(', ');
-    const reviewSnippet = (m.review || '').replace(/\s+/g, ' ').slice(0, 110);
+
     lines.push(
       `- "${m.title}" [${m.source}, ${m.sceneCount} scenes, rating=${m.rating ?? 'N/A'}/10]: arc=${arc}${
-        leadActors ? `; cast=${leadActors}` : ''
-      }${leadProps ? `; props=${leadProps}` : ''}${leadTdt ? `; 3DWords=${leadTdt}` : ''}${
-        leadAudio ? `; audio=${leadAudio}` : ''
-      }${reviewSnippet ? `; note="${reviewSnippet}"` : ''}`
+        cutPattern ? `; cuts=${cutPattern}` : ''
+      }${actorBlocking ? `; blocking=${actorBlocking}` : ''}${
+        propSummary ? `; props=${propSummary}` : ''
+      }${audioTiming ? `; audio=${audioTiming}` : ''}`
     );
   }
-  return `\nMATCHED .3MM CORPUS EXEMPLARS:\n${lines.join('\n')}`;
+
+  return `\nTRAINED .3MM CORPUS ANIMATION, CAMERA & AUDIO EXEMPLARS (${TRAINING_CORPUS.corpusStats?.totalMovies ?? TRAINING_CORPUS.movies.length} movies, ${TRAINING_CORPUS.corpusStats?.totalScenesAnalyzed ?? 670} scenes — emulate multi-action chains, depth/diagonal keyframe paths, rapid viewIndex cuts, and real .3MM MIDIs/SFX/voices):\n${lines.join('\n')}`;
 }
 
 function toSdkThinkingLevel(level?: 'MINIMAL' | 'LOW'): ThinkingLevel | undefined {
@@ -310,7 +342,7 @@ async function generateWithFallback(
   const trimmedPrompt = (prompt || '').trim();
   const requestedSceneCount = extractRequestedSceneCount(trimmedPrompt);
   const requestedActorCount = extractRequestedActorCount(trimmedPrompt);
-  const targetSceneCount = requestedSceneCount ?? 6;
+  const targetSceneCount = requestedSceneCount ?? 8;
   const corpusExemplars = selectCompactTrainingExemplars(trimmedPrompt, targetSceneCount);
   const schema = buildGeminiMoviePlanSchema(requestedSceneCount) as unknown as Schema;
 
@@ -326,10 +358,10 @@ async function generateWithFallback(
     storyIdea:
       trimmedPrompt.length > 0
         ? trimmedPrompt
-        : 'Create a hilarious, imaginative multi-scene (6-8+ scenes with intro & outro/credits) 3D Movie Maker adventure with varied scene lengths, scene transitions (cut/dissolve/fadeToBlack/fadeToWhite), clear setup, progression across sets, custom character/prop names, multi-actor cast in varied costumes, animated & stretched/colored props, dynamic camera cuts, 3D word, 2D dialogue/credits, and frame-specific MIDI changes/SFX/TTS voices.',
+        : 'Create a hilarious, imaginative multi-scene (7-10+ scenes with intro & outro/credits) 3D Movie Maker adventure with varied scene lengths, scene transitions (cut/dissolve/fadeToBlack/fadeToWhite), clear setup, progression across different sets, custom character/prop names, multi-actor cast in varied costumes, animated & stretched/colored props, dynamic camera cuts, 3D word, 2D dialogue/credits, and real MIDIs, SFX, and existing voices from catalogSummary.sounds alongside selective new ttsVoices.',
     ...(requestedSceneCount !== null
       ? { requestedSceneCount }
-      : { targetSceneRange: '5-12', supportsIntroAndOutro: true }),
+      : { targetSceneRange: '7-12', minimumScenes: 7, supportsIntroAndOutro: true }),
     ...(requestedActorCount !== null ? { requestedActorCount } : {}),
     catalogSummary,
   });
@@ -347,6 +379,7 @@ async function generateWithFallback(
             systemInstruction,
             responseMimeType: 'application/json',
             responseSchema: schema,
+            maxOutputTokens: 65536,
             ...(sdkThinking ? { thinkingConfig: { thinkingLevel: sdkThinking } } : {}),
           },
         });
@@ -359,9 +392,9 @@ async function generateWithFallback(
           throw new Error(`Gemini (${entry.model}) returned a plan with no scenes.`);
         }
 
-        const minimumDesiredScenes = requestedSceneCount ?? 5;
+        const minimumDesiredScenes = requestedSceneCount ?? 7;
         let safetyRounds = 0;
-        while (parsed.scenes.length < minimumDesiredScenes && safetyRounds < 2) {
+        while (parsed.scenes.length < minimumDesiredScenes && safetyRounds < 3) {
           safetyRounds++;
           const missing = minimumDesiredScenes - parsed.scenes.length;
           try {
@@ -369,11 +402,11 @@ async function generateWithFallback(
             const extPrompt = JSON.stringify({
               storyIdea:
                 trimmedPrompt ||
-                'Continue this 3DMM movie adventure seamlessly to a climactic finale and credits.',
+                'Continue this 3DMM movie adventure seamlessly with rich multi-scene progression, real MIDIs/SFX/sample voices from catalogSummary.sounds, and a climactic finale & outro/credits.',
               existingTitle: parsed.title,
               existingPlot: parsed.plot,
               existingSceneNames: parsed.scenes.map((s: { sceneName?: string }) => s.sceneName),
-              instruction: `Continue this exact story seamlessly and generate AT LEAST ${missing} additional distinct scenes so total scenes reaches ${minimumDesiredScenes}. Do NOT repeat existing scenes.`,
+              instruction: `Continue this exact story seamlessly and generate AT LEAST ${missing} additional distinct scenes so total scenes reaches ${minimumDesiredScenes} or more (>6 scenes). Do NOT repeat existing scenes.`,
               catalogSummary,
             });
             const extResp = await client.models.generateContent({
@@ -389,6 +422,7 @@ async function generateWithFallback(
                 }),
                 responseMimeType: 'application/json',
                 responseSchema: extSchema,
+                maxOutputTokens: 65536,
                 ...(sdkThinking ? { thinkingConfig: { thinkingLevel: sdkThinking } } : {}),
               },
             });
@@ -396,7 +430,7 @@ async function generateWithFallback(
             if (!extText) break;
             const extParsed = JSON.parse(extText);
             if (Array.isArray(extParsed?.scenes) && extParsed.scenes.length > 0) {
-              parsed.scenes = [...parsed.scenes, ...extParsed.scenes.slice(0, missing)];
+              parsed.scenes = [...parsed.scenes, ...extParsed.scenes];
             } else {
               break;
             }
