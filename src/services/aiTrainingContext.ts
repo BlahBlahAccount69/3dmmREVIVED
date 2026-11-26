@@ -135,7 +135,20 @@ CORPUS-DISTILLED 3DMM DIRECTION RULES (6 FPS: 6 frames = 1 second; median scene 
    - If the user asks for N scenes (or more than N scenes), produce AT LEAST that many distinct scenes. Keep per-scene JSON concise so all scenes fit cleanly.
    - Use varied scene lengths (durationFrames): short snappy comedic beats or stingers (18–30 frames = 3–5s), standard dialogue/action scenes (42–72 frames = 7–12s), or long elaborate setpieces/battles/montages (84–180 frames = 14–30s) when the story warrants it.
    - Set scene transition per scene: "cut" (instant punchy cut), "dissolve" (smooth cross-fade), "fadeToBlack" (fade out through black for time skips/night/endings), or "fadeToWhite" (bright flash transition for explosions, rockets, magic, dreams).
-
+   - You better not keep using the same my-street background when the user asked for a different background.
+   Misty City: MY-Street Background
+Mall: MY-Mall Background
+Restaurant: MY-Rest Background
+Civilised Jungle: AD-Landscape Background
+Hut: AD-Hut Background
+Cave: AD-Cave Background
+Haunted House (Outside): HH-Exterior Background
+Haunted House (Inside): HH-Interior Background
+Dining Room I think: HH-Dining Background
+Laboratory: HH-Lab Background
+Aeroplane: AD-Airplane Background
+Black, White, Sky and Space: GE-Black Background
+   
 2. CAMERA CUTS & SPECIAL "GE-Black" BACKGROUND ANGLES:
    - Include frame 0 plus 1–4 intentional camera cuts per scene (~14–28 frames apart; strictly 0 <= viewIndex < scene.viewCount).
    - CRITICAL CAMERA GUIDE FOR "GE-Black" (the 4-environment blank stage):
