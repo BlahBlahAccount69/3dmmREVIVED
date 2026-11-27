@@ -26,7 +26,16 @@ import {
   ThreeDmmCatalog,
 } from './threeDmmEngine';
 import { CatalogSoundItem, sound3DMM, synthesizeSapi4Tts } from './soundLibrary';
-import { CatalogSummaryPayload } from './aiTrainingContext';
+import {
+  buildGeminiMoviePlanSchema,
+  buildSystemInstruction,
+  CatalogSummaryPayload,
+  extractRequestedActorCount,
+  extractRequestedSceneCount,
+  MODEL_FALLBACK_CHAIN,
+} from './aiTrainingContext';
+import { selectFullTrainedCorpusContext, type TrainingCorpus } from './trainedCorpusFormatter';
+import { assetUrl } from '../utils/assetUrl';
 
 interface AiKeyframePlan {
   frame: number;
@@ -1473,45 +1482,244 @@ export function refineTrained3dmmChoreography(
   }
 }
 
+let cachedStaticCorpus: TrainingCorpus | null | undefined;
+
+async function loadStaticTrainingCorpus(): Promise<TrainingCorpus | null> {
+  if (cachedStaticCorpus !== undefined) return cachedStaticCorpus;
+  try {
+    const res = await fetch(assetUrl('3dmm/training_data.json'));
+    if (!res.ok) {
+      cachedStaticCorpus = null;
+      return null;
+    }
+    const parsed = (await res.json()) as TrainingCorpus;
+    cachedStaticCorpus = parsed && Array.isArray(parsed.movies) ? parsed : null;
+    return cachedStaticCorpus;
+  } catch {
+    cachedStaticCorpus = null;
+    return null;
+  }
+}
+
+async function callGeminiRestGenerate(params: {
+  apiKey: string;
+  model: string;
+  thinkingLevel?: 'MINIMAL' | 'LOW';
+  systemInstruction: string;
+  userMessage: string;
+  schema: Record<string, unknown>;
+}): Promise<AiMoviePlan> {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    params.model
+  )}:generateContent`;
+  const generationConfig: Record<string, unknown> = {
+    responseMimeType: 'application/json',
+    responseSchema: params.schema,
+    maxOutputTokens: 65536,
+  };
+  if (params.thinkingLevel) {
+    generationConfig.thinkingConfig = { thinkingLevel: params.thinkingLevel };
+  }
+
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': params.apiKey,
+    },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: params.systemInstruction }] },
+      contents: [{ role: 'user', parts: [{ text: params.userMessage }] }],
+      generationConfig,
+    }),
+  });
+
+  const payload = (await resp.json().catch(() => ({}))) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    error?: { message?: string; status?: string };
+  };
+
+  if (!resp.ok) {
+    throw new Error(
+      payload?.error?.message || `Gemini API HTTP ${resp.status}${payload?.error?.status ? ` (${payload.error.status})` : ''}`
+    );
+  }
+
+  const text = (payload.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text || '')
+    .join('')
+    .trim();
+  if (!text) {
+    throw new Error(`Gemini (${params.model}) returned an empty response.`);
+  }
+  const parsed = JSON.parse(text) as AiMoviePlan;
+  if (!parsed || !Array.isArray(parsed.scenes) || parsed.scenes.length === 0) {
+    throw new Error(`Gemini (${params.model}) returned a plan with no scenes.`);
+  }
+  return parsed;
+}
+
+async function requestDirectGeminiFallback(
+  prompt: string,
+  catalogSummary: CatalogSummaryPayload,
+  directorName?: string
+): Promise<AiMoviePlan> {
+  const apiKey = (import.meta.env.VITE_GEMINI_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error(
+      'AI Movie Generator endpoint returned HTTP 405 on static hosting (GitHub Pages has no Node/Express server) and no VITE_GEMINI_API_KEY was provided at build time. Add GEMINI_API_KEY (or VITE_GEMINI_API_KEY) to your repository Actions Secrets and redeploy.'
+    );
+  }
+
+  const trimmedPrompt = (prompt || '').trim();
+  const requestedSceneCount = extractRequestedSceneCount(trimmedPrompt);
+  const requestedActorCount = extractRequestedActorCount(trimmedPrompt);
+  const targetSceneCount = requestedSceneCount ?? 8;
+  const corpus = await loadStaticTrainingCorpus();
+  const { corpusPromptText: corpusExemplars, matchedMovieNames } = selectFullTrainedCorpusContext(
+    corpus,
+    trimmedPrompt,
+    targetSceneCount
+  );
+  const schema = buildGeminiMoviePlanSchema(requestedSceneCount) as unknown as Record<string, unknown>;
+  const systemInstruction = buildSystemInstruction({
+    prompt: trimmedPrompt,
+    requestedSceneCount,
+    requestedActorCount,
+    corpusExemplars,
+    directorName,
+  });
+
+  const userMessage = JSON.stringify({
+    storyIdea:
+      trimmedPrompt.length > 0
+        ? trimmedPrompt
+        : 'Create a hilarious, imaginative multi-scene (7-10+ scenes with intro & outro/credits) 3D Movie Maker adventure with varied scene lengths, scene transitions (cut/dissolve/fadeToBlack/fadeToWhite), clear setup, progression across different sets, custom character/prop names, multi-actor cast in varied costumes, animated & stretched/colored props, dynamic camera cuts, 3D word, 2D dialogue/credits, and real MIDIs, SFX, and existing voices from catalogSummary.sounds alongside selective new ttsVoices.',
+    ...(requestedSceneCount !== null
+      ? { requestedSceneCount }
+      : { targetSceneRange: '7-12', minimumScenes: 7, supportsIntroAndOutro: true }),
+    ...(requestedActorCount !== null ? { requestedActorCount } : {}),
+    trainedCorpusCount: corpus?.movies.length ?? 0,
+    topMatchedTrainedMovies: matchedMovieNames,
+    trainingDirective:
+      'You have been sent ALL 46 trained 3DMM & 3dmmstudio movies in TRAINED_MOVIES_FULL_CORPUS (including every movie highlight, camera cut, actor keyframe path, multi-beat action chain, prop assembly, 3D title, caption, and MIDI/SFX track). Directly emulate their animation style, multi-beat action pacing, and audio cues.',
+    catalogSummary,
+  });
+
+  let lastErr: unknown;
+  for (const entry of MODEL_FALLBACK_CHAIN) {
+    try {
+      const parsed = await callGeminiRestGenerate({
+        apiKey,
+        model: entry.model,
+        thinkingLevel: entry.thinkingLevel,
+        systemInstruction,
+        userMessage,
+        schema,
+      });
+
+      const minimumDesiredScenes = requestedSceneCount ?? 7;
+      let safetyRounds = 0;
+      while (parsed.scenes.length < minimumDesiredScenes && safetyRounds < 3) {
+        safetyRounds++;
+        const missing = minimumDesiredScenes - parsed.scenes.length;
+        try {
+          const extSchema = buildGeminiMoviePlanSchema(missing) as unknown as Record<string, unknown>;
+          const extPrompt = JSON.stringify({
+            storyIdea:
+              trimmedPrompt ||
+              'Continue this 3DMM movie adventure seamlessly with rich multi-scene progression, real MIDIs/SFX/sample voices from catalogSummary.sounds, and a climactic finale & outro/credits.',
+            existingTitle: parsed.title,
+            existingPlot: parsed.plot,
+            existingSceneNames: parsed.scenes.map((s) => s.sceneName),
+            instruction: `Continue this exact story seamlessly and generate AT LEAST ${missing} additional distinct scenes so total scenes reaches ${minimumDesiredScenes} or more (>6 scenes). Do NOT repeat existing scenes.`,
+            catalogSummary,
+          });
+          const extParsed = await callGeminiRestGenerate({
+            apiKey,
+            model: entry.model,
+            thinkingLevel: entry.thinkingLevel,
+            systemInstruction: buildSystemInstruction({
+              prompt: trimmedPrompt,
+              requestedSceneCount: missing,
+              requestedActorCount,
+              corpusExemplars,
+              directorName,
+            }),
+            userMessage: extPrompt,
+            schema: extSchema,
+          });
+          if (Array.isArray(extParsed.scenes) && extParsed.scenes.length > 0) {
+            parsed.scenes = [...parsed.scenes, ...extParsed.scenes];
+          } else {
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+
+      return parsed;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error('Gemini static fallback failed to generate a movie.');
+}
+
 async function requestAiMoviePlan(
   prompt: string,
   catalogSummary: CatalogSummaryPayload,
   directorName?: string
 ): Promise<AiMoviePlan> {
   const trimmedDirector = directorName?.trim();
-  const res = await fetch('/api/ai/generate-movie', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      prompt,
-      catalogSummary,
-      ...(trimmedDirector ? { directorName: trimmedDirector } : {}),
-    }),
-  });
+  let serverStatus = 0;
+  let serverErrorMessage = '';
 
-  const contentType = res.headers.get('content-type') || '';
-  const isJson = /application\/json/i.test(contentType);
-  const payload = isJson
-    ? ((await res.json().catch(() => ({}))) as {
-        moviePlan?: AiMoviePlan;
-        error?: string;
-      })
-    : {};
+  try {
+    const res = await fetch('/api/ai/generate-movie', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        catalogSummary,
+        ...(trimmedDirector ? { directorName: trimmedDirector } : {}),
+      }),
+    });
+    serverStatus = res.status;
 
-  if (res.ok && payload.moviePlan) {
-    return payload.moviePlan;
+    const contentType = res.headers.get('content-type') || '';
+    const isJson = /application\/json/i.test(contentType);
+    const payload = isJson
+      ? ((await res.json().catch(() => ({}))) as {
+          moviePlan?: AiMoviePlan;
+          error?: string;
+        })
+      : {};
+
+    if (res.ok && payload.moviePlan) {
+      return payload.moviePlan;
+    }
+
+    if (res.status !== 404 && res.status !== 405 && isJson && payload.error) {
+      serverErrorMessage = payload.error;
+    } else if (res.status !== 404 && res.status !== 405 && res.ok === false) {
+      serverErrorMessage = `AI Movie Generator server request failed (${res.status}).`;
+    }
+  } catch (err) {
+    // Network/offline error reaching /api route: fall through only if status wasn't a server 5xx/400/403
+    if (serverStatus && serverStatus !== 404 && serverStatus !== 405) {
+      throw err;
+    }
   }
 
-  if (res.status === 405) {
-    throw new Error(
-      'AI Movie Generator endpoint returned HTTP 405 (Method Not Allowed). Start the app with its Node/Express server (`npm run dev` or `npm start`) rather than static-only hosting.'
-    );
+  if (serverErrorMessage) {
+    throw new Error(serverErrorMessage);
   }
 
-  throw new Error(
-    payload.error ||
-      `AI Movie Generator server request failed (${res.status}). Ensure GEMINI_API_KEY is configured in Settings > Secrets.`
-  );
+  // Fallback for static-only hosting (e.g., GitHub Pages returning HTTP 405 / 404 with no Express server)
+  return requestDirectGeminiFallback(prompt, catalogSummary, trimmedDirector);
 }
 
 export async function generateAiMovie(options: {

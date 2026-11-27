@@ -50,32 +50,88 @@ export const SAPI4_VOICES: Sapi4VoicePreset[] = [
   { id: 'Adult Male #2, American English (TruVoice)', label: 'Adult Male #2 / Bonzi (TruVoice)', minPitch: 50, maxPitch: 400, defPitch: 140, minSpeed: 50, maxSpeed: 250, defSpeed: 157 },
 ];
 
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 export async function synthesizeSapi4Tts(params: {
   text: string;
   voice?: string;
   pitch?: number;
   speed?: number;
 }): Promise<{ audioData: string; voice: string; pitch: number; speed: number }> {
-  const res = await fetch('/api/tts/sapi4', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  const payload = (await res.json().catch(() => ({}))) as {
-    audioData?: string;
-    voice?: string;
-    pitch?: number;
-    speed?: number;
-    error?: string;
-  };
-  if (!res.ok || !payload.audioData) {
-    throw new Error(payload.error || `SAPI4 TTS failed (${res.status}).`);
+  const cleanText = String(params.text || '').trim().slice(0, 280);
+  if (!cleanText) {
+    throw new Error('TTS text is required.');
+  }
+
+  let serverStatus = 0;
+  try {
+    const res = await fetch('/api/tts/sapi4', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    serverStatus = res.status;
+    const isJson = /application\/json/i.test(res.headers.get('content-type') || '');
+    const payload = isJson
+      ? ((await res.json().catch(() => ({}))) as {
+          audioData?: string;
+          voice?: string;
+          pitch?: number;
+          speed?: number;
+          error?: string;
+        })
+      : {};
+    if (res.ok && payload.audioData) {
+      return {
+        audioData: payload.audioData,
+        voice: payload.voice || params.voice || 'Sam',
+        pitch: payload.pitch ?? params.pitch ?? 100,
+        speed: payload.speed ?? params.speed ?? 150,
+      };
+    }
+    if (res.status !== 404 && res.status !== 405 && isJson && payload.error) {
+      throw new Error(payload.error);
+    }
+  } catch (err) {
+    if (serverStatus && serverStatus !== 404 && serverStatus !== 405) {
+      throw err;
+    }
+  }
+
+  // Static-host fallback (no /api server, e.g., GitHub Pages)
+  const preset =
+    SAPI4_VOICES.find((v) => v.id.toLowerCase() === (params.voice || '').trim().toLowerCase()) ||
+    SAPI4_VOICES[0];
+  const voice = preset.id;
+  const pitch = Math.round(
+    Math.max(preset.minPitch, Math.min(preset.maxPitch, params.pitch ?? preset.defPitch))
+  );
+  const speed = Math.round(
+    Math.max(preset.minSpeed, Math.min(preset.maxSpeed, params.speed ?? preset.defSpeed))
+  );
+  const url =
+    `https://www.tetyys.com/SAPI4/SAPI4?text=${encodeURIComponent(cleanText)}` +
+    `&voice=${encodeURIComponent(voice)}&pitch=${pitch}&speed=${speed}`;
+  const direct = await fetch(url);
+  if (!direct.ok) {
+    throw new Error(`SAPI4 TTS fallback failed (${direct.status}).`);
+  }
+  const bytes = new Uint8Array(await direct.arrayBuffer());
+  if (bytes.length < 44 || bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) {
+    throw new Error('SAPI4 TTS fallback returned invalid WAV audio.');
   }
   return {
-    audioData: payload.audioData,
-    voice: payload.voice || params.voice || 'Sam',
-    pitch: payload.pitch ?? params.pitch ?? 100,
-    speed: payload.speed ?? params.speed ?? 150,
+    audioData: `data:audio/wav;base64,${uint8ToBase64(bytes)}`,
+    voice,
+    pitch,
+    speed,
   };
 }
 
