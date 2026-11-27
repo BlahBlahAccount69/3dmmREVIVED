@@ -15,9 +15,9 @@ jobs:
         with:
           node-version: 22
       - run: npm install --legacy-peer-deps
-      - run: npm run build -- --base=./
+      -      - run: npm run build -- --base=./
         env:
-          VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY || secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       - run: touch ./dist/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
