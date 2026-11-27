@@ -1567,7 +1567,7 @@ async function requestDirectGeminiFallback(
   const apiKey = (import.meta.env.VITE_GEMINI_API_KEY || '').trim();
   if (!apiKey) {
     throw new Error(
-      'AI Movie Generator endpoint returned HTTP 405 on static hosting (GitHub Pages has no Node/Express server) and no VITE_GEMINI_API_KEY was provided at build time. Add GEMINI_API_KEY (or VITE_GEMINI_API_KEY) to your repository Actions Secrets and redeploy.'
+      'AI Movie Generator endpoint returned HTTP 405 on static hosting (no Node/Express server) and no GEMINI_API_KEY was provided at build time. Add GEMINI_API_KEY to your repository Actions Secrets (or build environment) and redeploy.'
     );
   }
 
@@ -1702,9 +1702,14 @@ async function requestAiMoviePlan(
       return payload.moviePlan;
     }
 
-    if (res.status !== 404 && res.status !== 405 && isJson && payload.error) {
+    const isStaticEndpointMissing =
+      res.status === 404 ||
+      res.status === 405 ||
+      res.status === 501 ||
+      !isJson;
+    if (!isStaticEndpointMissing && payload.error) {
       serverErrorMessage = payload.error;
-    } else if (res.status !== 404 && res.status !== 405 && res.ok === false) {
+    } else if (!isStaticEndpointMissing && res.ok === false) {
       serverErrorMessage = `AI Movie Generator server request failed (${res.status}).`;
     }
   } catch (err) {
