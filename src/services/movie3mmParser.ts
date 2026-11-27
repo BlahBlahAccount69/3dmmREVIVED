@@ -1011,6 +1011,7 @@ export async function loadOfficial3mmMovie(
             for (const [fk, av] of akEntries) {
               tdtActionKeyframes[Number(fk)] = {
                 action: anidToTdtAction(av.anid),
+                ...(av.celOffset ? { celOffset: av.celOffset } : {}),
                 ...(av.freeze ? { freeze: true } : {}),
               };
             }
@@ -1033,6 +1034,7 @@ export async function loadOfficial3mmMovie(
                 for (const [fk, av] of Object.entries(parsedTdta.actionKeyframes)) {
                   normKfs[Number(fk)] = {
                     action: normalizeTdtActionName(av.action),
+                    ...(av.celOffset !== undefined ? { celOffset: av.celOffset } : {}),
                     ...(av.freeze ? { freeze: true } : {}),
                   };
                 }

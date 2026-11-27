@@ -95,6 +95,7 @@ export interface ParsedTemplate {
   bmdls: Map<number, THREE.BufferGeometry>;
   cmtls: Map<number, ParsedCmtl>;
   actionCache: Map<number, ParsedAction>;
+  actionLoadPromises?: Map<number, Promise<ParsedAction | null>>;
   tmplsFile: ChunkyFile;
   tmplMeta: ChunkMeta;
 }
@@ -823,79 +824,92 @@ async function parseCmtl(
   return { cmid, ibset, materials, colors, tmapCnos, skinHexes, overrideGeometries };
 }
 
-export async function loadAction(
+export function loadAction(
   template: ParsedTemplate,
   anid: number
 ): Promise<ParsedAction | null> {
   const cached = template.actionCache.get(anid);
-  if (cached) return cached;
+  if (cached) return Promise.resolve(cached);
 
-  const actnMeta = template.tmplsFile.findKid(template.tmplMeta, 'ACTN', anid);
-  if (!actnMeta) return null;
-
-  const archive = template.tmplsFile;
-  const actnBytes = await archive.readChunk('ACTN', actnMeta.cno);
-  const actnDv = new DataView(actnBytes.buffer, actnBytes.byteOffset, actnBytes.byteLength);
-  const grfactn = actnBytes.length >= 8 ? actnDv.getUint32(4, true) : 0;
-
-  const ggclMeta = archive.findKid(actnMeta, 'GGCL', 0) || archive.findKid(actnMeta, 'GGCL');
-  const glxfMeta = archive.findKid(actnMeta, 'GLXF', 0) || archive.findKid(actnMeta, 'GLXF');
-  if (!ggclMeta || !glxfMeta) return null;
-
-  const [ggclBytes, glxfBytes] = await Promise.all([
-    archive.readChunk('GGCL', ggclMeta.cno),
-    archive.readChunk('GLXF', glxfMeta.cno),
-  ]);
-
-  const glxf = parseGL(glxfBytes);
-  const matrices: THREE.Matrix4[] = [];
-  for (let i = 0; i < glxf.count; i++) {
-    matrices.push(readBmat34ToMatrix4(glxf.dv, glxf.entryOffset(i)));
+  if (!template.actionLoadPromises) {
+    template.actionLoadPromises = new Map();
   }
+  const existing = template.actionLoadPromises.get(anid);
+  if (existing) return existing;
 
-  const ggcl = parseGG(ggclBytes);
-  const cels: ParsedAction['cels'] = [];
-  const neededBmdls: Promise<void>[] = [];
+  const job = (async (): Promise<ParsedAction | null> => {
+    const actnMeta = template.tmplsFile.findKid(template.tmplMeta, 'ACTN', anid);
+    if (!actnMeta) return null;
 
-  for (let icel = 0; icel < ggcl.count; icel++) {
-    const entry = ggcl.getEntry(icel);
-    const dwr = readFixed16(ggcl.dv, entry.fixedOffset + 4);
-    const cpsCount = Math.floor(entry.varLength / 4);
-    const parts: ActionCelPartSpec[] = [];
+    const archive = template.tmplsFile;
+    const actnBytes = await archive.readChunk('ACTN', actnMeta.cno);
+    const actnDv = new DataView(actnBytes.buffer, actnBytes.byteOffset, actnBytes.byteLength);
+    const grfactn = actnBytes.length >= 8 ? actnDv.getUint32(4, true) : 0;
 
-    for (let ip = 0; ip < cpsCount; ip++) {
-      const off = entry.varOffset + ip * 4;
-      const chidModl = ggcl.dv.getInt16(off, true);
-      const imat34 = ggcl.dv.getInt16(off + 2, true);
-      parts.push({ chidModl, imat34 });
+    const ggclMeta = archive.findKid(actnMeta, 'GGCL', 0) || archive.findKid(actnMeta, 'GGCL');
+    const glxfMeta = archive.findKid(actnMeta, 'GLXF', 0) || archive.findKid(actnMeta, 'GLXF');
+    if (!ggclMeta || !glxfMeta) return null;
 
-      if (chidModl >= 0 && !template.bmdls.has(chidModl)) {
-        const bKid = archive.findKid(template.tmplMeta, 'BMDL', chidModl);
-        if (bKid) {
-          neededBmdls.push(
-            archive.readChunk('BMDL', bKid.cno).then((raw) => {
-              template.bmdls.set(chidModl, parseBmdlGeometry(raw));
-            })
-          );
+    const [ggclBytes, glxfBytes] = await Promise.all([
+      archive.readChunk('GGCL', ggclMeta.cno),
+      archive.readChunk('GLXF', glxfMeta.cno),
+    ]);
+
+    const glxf = parseGL(glxfBytes);
+    const matrices: THREE.Matrix4[] = [];
+    for (let i = 0; i < glxf.count; i++) {
+      matrices.push(readBmat34ToMatrix4(glxf.dv, glxf.entryOffset(i)));
+    }
+
+    const ggcl = parseGG(ggclBytes);
+    const cels: ParsedAction['cels'] = [];
+    const neededBmdls: Promise<void>[] = [];
+
+    for (let icel = 0; icel < ggcl.count; icel++) {
+      const entry = ggcl.getEntry(icel);
+      const dwr = readFixed16(ggcl.dv, entry.fixedOffset + 4);
+      const cpsCount = Math.floor(entry.varLength / 4);
+      const parts: ActionCelPartSpec[] = [];
+
+      for (let ip = 0; ip < cpsCount; ip++) {
+        const off = entry.varOffset + ip * 4;
+        const chidModl = ggcl.dv.getInt16(off, true);
+        const imat34 = ggcl.dv.getInt16(off + 2, true);
+        parts.push({ chidModl, imat34 });
+
+        if (chidModl >= 0 && !template.bmdls.has(chidModl)) {
+          const bKid = archive.findKid(template.tmplMeta, 'BMDL', chidModl);
+          if (bKid) {
+            neededBmdls.push(
+              archive.readChunk('BMDL', bKid.cno).then((raw) => {
+                template.bmdls.set(chidModl, parseBmdlGeometry(raw));
+              })
+            );
+          }
         }
       }
+      cels.push({ dwr, parts });
     }
-    cels.push({ dwr, parts });
-  }
 
-  if (neededBmdls.length > 0) {
-    await Promise.all(neededBmdls);
-  }
+    if (neededBmdls.length > 0) {
+      await Promise.all(neededBmdls);
+    }
 
-  const action: ParsedAction = {
-    anid,
-    name: actnMeta.name || (anid === 0 ? 'At Rest' : `Action ${anid}`),
-    grfactn,
-    cels,
-    matrices,
-  };
-  template.actionCache.set(anid, action);
-  return action;
+    const action: ParsedAction = {
+      anid,
+      name: actnMeta.name || (anid === 0 ? 'At Rest' : `Action ${anid}`),
+      grfactn,
+      cels,
+      matrices,
+    };
+    template.actionCache.set(anid, action);
+    return action;
+  })().finally(() => {
+    template.actionLoadPromises?.delete(anid);
+  });
+
+  template.actionLoadPromises.set(anid, job);
+  return job;
 }
 
 /**
@@ -1487,6 +1501,11 @@ export function anidToTdtAction(anid: number): TdtAction {
 export function tdtActionToAnid(action?: string): number {
   const norm = normalizeTdtActionName(action);
   return TDT_ACTION_TO_ANID[norm] ?? 0;
+}
+
+export function getTdtActionCelCount(action?: string): number {
+  const anid = tdtActionToAnid(action);
+  return anid === 0 ? 1 : anid >= 8 && anid <= 13 ? 24 : 12;
 }
 
 export function normalizeTdtActionName(raw?: string): TdtAction {

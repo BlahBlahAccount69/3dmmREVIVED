@@ -18,6 +18,7 @@ import {
   CatalogActorItem,
   CatalogPropItem,
   CatalogSceneItem,
+  getTdtActionCelCount,
   LoadedBackgroundView,
   loadTemplate,
   loadThreeDmmCatalog,
@@ -36,6 +37,7 @@ import {
   LivePlayheadState,
   resolveActiveCameraAtFrame,
   resolveInterpolatedKeyframe,
+  resolveTdtActionAtFrame,
   StageEntityType,
   TransitionOverlayState,
   Viewport3D,
@@ -868,7 +870,11 @@ export default function App() {
         if (t.id !== id) return t;
         const nextMap = {
           ...(t.actionKeyframes || { 0: { action: t.action || 'At Rest' } }),
-          [currentFrame]: { action },
+          [currentFrame]: {
+            action,
+            celOffset: 0,
+            freeze: action === 'At Rest',
+          },
         };
         return {
           ...t,
@@ -1430,13 +1436,55 @@ export default function App() {
       return next;
     };
 
-    updated[currentSceneIndex] = patchSceneEntityKeyframes(
+    let patchedScene = patchSceneEntityKeyframes(
       currentScene,
       id,
       type,
       patchKeyframes,
       tf
     );
+
+    if (type === 'tdt' && (mode === 'pin' || mode === 'showFrom')) {
+      patchedScene = {
+        ...patchedScene,
+        tdtTexts: (patchedScene.tdtTexts || []).map((t) => {
+          if (t.id !== id) return t;
+          const prevMap = { ...(t.actionKeyframes || { 0: { action: t.action || 'At Rest' } }) };
+          if (mode === 'pin') {
+            const resolved = resolveTdtActionAtFrame(t, currentFrame);
+            const rawCel = resolved.freeze
+              ? resolved.celOffset
+              : resolved.celOffset + Math.max(0, currentFrame - resolved.startFrame);
+            const celsLen = getTdtActionCelCount(resolved.action);
+            const curCel = celsLen > 1 ? ((rawCel % celsLen) + celsLen) % celsLen : 0;
+            prevMap[tf] = {
+              action: resolved.action,
+              celOffset: curCel,
+              freeze: true,
+            };
+            return { ...t, actionKeyframes: prevMap };
+          }
+          // showFrom: ensure action starts cleanly at entrance frame tf when prior keys only existed before tf
+          const resolvedAtTf = resolveTdtActionAtFrame(t, tf);
+          if (!prevMap[tf]) {
+            const hasLaterKeys = Object.keys(prevMap).some((k) => Number(k) > tf);
+            if (!hasLaterKeys && tf > 0) {
+              for (const k of Object.keys(prevMap)) {
+                if (Number(k) < tf) delete prevMap[Number(k)];
+              }
+            }
+            prevMap[tf] = {
+              action: resolvedAtTf.action,
+              celOffset: 0,
+              freeze: resolvedAtTf.action === 'At Rest',
+            };
+          }
+          return { ...t, actionKeyframes: prevMap };
+        }),
+      };
+    }
+
+    updated[currentSceneIndex] = patchedScene;
     setMovie({ ...movie, scenes: updated });
     setCurrentFrame(tf);
     setRenderFrame(tf);
@@ -1447,7 +1495,7 @@ export default function App() {
         ? `Set ${type} to enter stage at Frame ${tf}.`
         : mode === 'hideFrom'
           ? `Set ${type} to exit/hide starting at Frame ${tf}.`
-          : `Pinned pose/position at Frame ${tf}.`
+          : `Pinned ${type === 'tdt' ? '3D text pose/frame' : 'pose/position'} at Frame ${tf}.`
     );
   };
 
@@ -1471,7 +1519,7 @@ export default function App() {
 
   const handleUpdateEntityPoseCel = (
     id: string,
-    type: 'actor' | 'prop',
+    type: 'actor' | 'prop' | 'tdt',
     celOffset: number,
     freeze: boolean
   ) => {
@@ -1502,7 +1550,7 @@ export default function App() {
           };
         }),
       };
-    } else {
+    } else if (type === 'prop') {
       updated[currentSceneIndex] = {
         ...currentScene,
         props: currentScene.props.map((p) => {
@@ -1524,10 +1572,32 @@ export default function App() {
           };
         }),
       };
+    } else {
+      updated[currentSceneIndex] = {
+        ...currentScene,
+        tdtTexts: (currentScene.tdtTexts || []).map((t) => {
+          if (t.id !== id) return t;
+          const prevMap = t.actionKeyframes || { 0: { action: t.action || 'At Rest' } };
+          const curKeys = Object.keys(prevMap).map(Number).sort((x, y) => x - y);
+          const prevKey = curKeys.filter((k) => k <= currentFrame).pop();
+          const curAct = prevKey !== undefined ? prevMap[prevKey] : { action: t.action || 'At Rest' };
+          return {
+            ...t,
+            actionKeyframes: {
+              ...prevMap,
+              [currentFrame]: {
+                action: curAct.action,
+                celOffset: cleanCel,
+                freeze,
+              },
+            },
+          };
+        }),
+      };
     }
     setMovie({ ...movie, scenes: updated });
     setStatusMessage(
-      `${freeze ? 'Pinned' : 'Started'} ${type} cel #${cleanCel} at Frame ${currentFrame}.`
+      `${freeze ? 'Pinned' : 'Started'} ${type === 'tdt' ? '3D text' : type} cel #${cleanCel} at Frame ${currentFrame}.`
     );
   };
 

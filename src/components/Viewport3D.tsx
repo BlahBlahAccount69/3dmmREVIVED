@@ -28,7 +28,28 @@ import {
   TemplateRig,
 } from '../services/threeDmmEngine';
 import { sound3DMM } from '../services/soundLibrary';
+import { getArchive } from '../services/chunkyParser';
 import { assetUrl } from '../utils/assetUrl';
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  isCancelled: () => boolean,
+  attempts = 3
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    if (isCancelled()) throw new Error('cancelled');
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1 && !isCancelled()) {
+        await new Promise((r) => setTimeout(r, 200 * (i + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
 
 export type StageEntityType = 'actor' | 'prop' | 'tdt' | 'tbox';
 
@@ -443,10 +464,15 @@ export function resolvePropActionAtFrame(
 export function resolveTdtActionAtFrame(
   tdt: TdtTextEntity,
   frame: number
-): { action: string; startFrame: number; freeze: boolean } {
+): { action: string; startFrame: number; celOffset: number; freeze: boolean } {
   const akfs = tdt.actionKeyframes;
   if (!akfs) {
-    return { action: normalizeTdtActionName(tdt.action), startFrame: 0, freeze: false };
+    return {
+      action: normalizeTdtActionName(tdt.action),
+      startFrame: 0,
+      celOffset: 0,
+      freeze: false,
+    };
   }
   const frames = Object.keys(akfs).map(Number).sort((a, b) => a - b);
   let chosenFrame = -1;
@@ -458,10 +484,16 @@ export function resolveTdtActionAtFrame(
     return {
       action: normalizeTdtActionName(akfs[chosenFrame].action),
       startFrame: chosenFrame,
+      celOffset: akfs[chosenFrame].celOffset ?? 0,
       freeze: Boolean(akfs[chosenFrame].freeze),
     };
   }
-  return { action: normalizeTdtActionName(tdt.action), startFrame: 0, freeze: false };
+  return {
+    action: normalizeTdtActionName(tdt.action),
+    startFrame: 0,
+    celOffset: 0,
+    freeze: false,
+  };
 }
 
 function evalMonotoneHermiteSegment(
@@ -1407,62 +1439,76 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
     });
 
-    Promise.all(
-      sceneData.actors.map(async (actor) => {
-        try {
-          let rig = existing.get(actor.id);
-          if (rig && rig.template.tmplCno !== actor.tmplCno) {
-            group.remove(rig.root);
-            disposeRig(rig.root);
-            existing.delete(actor.id);
-            rig = undefined;
-          }
-          const costumeKey = JSON.stringify({
-            c: actor.costumeCmids || [],
-            m: actor.costumeMtrls || [],
-          });
-          if (!rig) {
-            const tmpl = await loadTemplate(actor.tmplCno);
-            if (cancelled) return;
-            rig = instantiateTemplateRig(tmpl, actor.costumeCmids, actor.costumeMtrls);
-            rig.root.userData = {
-              id: actor.id,
-              type: 'actor',
-              tmplCno: actor.tmplCno,
-              appliedCostumeKey: costumeKey,
-              enableShading: enableShadingRef.current,
-            };
-            applyObjectShadingMode(rig.root, enableShadingRef.current);
-            group.add(rig.root);
-            existing.set(actor.id, rig);
-          } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
-            rig.root.userData.appliedCostumeKey = costumeKey;
-            applyCostumeToRig(rig, actor.costumeCmids || [], actor.costumeMtrls);
-            applyObjectShadingMode(rig.root, enableShadingRef.current);
-          }
+    (async () => {
+      if (sceneData.actors.length + sceneData.props.length >= 2) {
+        await getArchive(assetUrl('3dmm/3dmovie/TMPLS.3CN'), false)
+          .then((f) => f.ensureFullBuffer())
+          .catch(() => {});
+      }
+      if (cancelled) return;
 
-          const neededAnids = new Set<number>([actor.anid]);
-          if (actor.actionKeyframes) {
-            Object.values(actor.actionKeyframes).forEach((k) => neededAnids.add(k.anid));
-          }
-          await Promise.all(
-            Array.from(neededAnids).map(async (anid) => {
-              const key = `${actor.id}:${anid}`;
-              if (!activeActionsRef.current.has(key)) {
-                const act = await loadAction(rig!.template, anid);
-                if (!cancelled && act) {
-                  activeActionsRef.current.set(key, act);
+      await Promise.all(
+        sceneData.actors.map(async (actor) => {
+          try {
+            let rig = existing.get(actor.id);
+            if (rig && rig.template.tmplCno !== actor.tmplCno) {
+              group.remove(rig.root);
+              disposeRig(rig.root);
+              existing.delete(actor.id);
+              rig = undefined;
+            }
+            const costumeKey = JSON.stringify({
+              c: actor.costumeCmids || [],
+              m: actor.costumeMtrls || [],
+            });
+            if (!rig) {
+              const tmpl = await withRetry(() => loadTemplate(actor.tmplCno), () => cancelled);
+              if (cancelled) return;
+              rig = instantiateTemplateRig(tmpl, actor.costumeCmids, actor.costumeMtrls);
+              rig.root.userData = {
+                id: actor.id,
+                type: 'actor',
+                tmplCno: actor.tmplCno,
+                appliedCostumeKey: costumeKey,
+                enableShading: enableShadingRef.current,
+              };
+              applyObjectShadingMode(rig.root, enableShadingRef.current);
+              group.add(rig.root);
+              existing.set(actor.id, rig);
+              if (!cancelled) setSyncVersion((v) => v + 1);
+            } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
+              rig.root.userData.appliedCostumeKey = costumeKey;
+              applyCostumeToRig(rig, actor.costumeCmids || [], actor.costumeMtrls);
+              applyObjectShadingMode(rig.root, enableShadingRef.current);
+            }
+
+            const neededAnids = new Set<number>([actor.anid]);
+            if (actor.actionKeyframes) {
+              Object.values(actor.actionKeyframes).forEach((k) => neededAnids.add(k.anid));
+            }
+            await Promise.all(
+              Array.from(neededAnids).map(async (anid) => {
+                const key = `${actor.id}:${anid}`;
+                if (!activeActionsRef.current.has(key)) {
+                  const act = await withRetry(
+                    () => loadAction(rig!.template, anid),
+                    () => cancelled
+                  ).catch(() => null);
+                  if (!cancelled && act) {
+                    activeActionsRef.current.set(key, act);
+                  }
                 }
-              }
-            })
-          );
-        } catch (err) {
-          console.warn(`Failed loading actor ${actor.name}:`, err);
-        }
-      })
-    ).then(() => {
+              })
+            );
+          } catch (err) {
+            if (!cancelled) {
+              console.warn(`Failed loading actor ${actor.name}:`, err);
+            }
+          }
+        })
+      );
       if (!cancelled) setSyncVersion((v) => v + 1);
-    });
+    })();
 
     return () => {
       cancelled = true;
@@ -1484,75 +1530,89 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
     });
 
-    Promise.all(
-      sceneData.props.map(async (prop) => {
-        try {
-          let rig = existing.get(prop.id);
-          if (rig && rig.template.tmplCno !== prop.tmplCno) {
-            group.remove(rig.root);
-            disposeRig(rig.root);
-            existing.delete(prop.id);
-            rig = undefined;
-          }
-          const costumeKey = JSON.stringify({
-            c: prop.costumeCmids || [],
-            m: prop.costumeMtrls || [],
-          });
-          if (!rig) {
-            const tmpl = await loadTemplate(prop.tmplCno);
-            if (cancelled) return;
-            rig = instantiateTemplateRig(tmpl, prop.costumeCmids, prop.costumeMtrls);
-            rig.root.userData = {
-              id: prop.id,
-              type: 'prop',
-              tmplCno: prop.tmplCno,
-              appliedCostumeKey: costumeKey,
-              enableShading: enableShadingRef.current,
-            };
-            applyObjectShadingMode(rig.root, enableShadingRef.current);
-            group.add(rig.root);
-            existing.set(prop.id, rig);
-          } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
-            rig.root.userData.appliedCostumeKey = costumeKey;
-            applyCostumeToRig(rig, prop.costumeCmids || [], prop.costumeMtrls);
-            applyObjectShadingMode(rig.root, enableShadingRef.current);
-          }
+    (async () => {
+      if (sceneData.actors.length + sceneData.props.length >= 2) {
+        await getArchive(assetUrl('3dmm/3dmovie/TMPLS.3CN'), false)
+          .then((f) => f.ensureFullBuffer())
+          .catch(() => {});
+      }
+      if (cancelled) return;
 
-          const tmpl = rig.template;
-          const neededAnids = new Set<number>([prop.anid ?? tmpl.actions[0]?.anid ?? 0]);
-          const matchByName = (name?: string) => {
-            if (!name) return undefined;
-            const norm = name.trim().toLowerCase();
-            return tmpl.actions.find((a) => a.name.trim().toLowerCase() === norm)?.anid;
-          };
-          const m0 = matchByName(prop.action);
-          if (m0 !== undefined) neededAnids.add(m0);
-          if (prop.actionKeyframes) {
-            Object.values(prop.actionKeyframes).forEach((k) => {
-              if (k.anid !== undefined) neededAnids.add(k.anid);
-              const mk = matchByName(k.action);
-              if (mk !== undefined) neededAnids.add(mk);
+      await Promise.all(
+        sceneData.props.map(async (prop) => {
+          try {
+            let rig = existing.get(prop.id);
+            if (rig && rig.template.tmplCno !== prop.tmplCno) {
+              group.remove(rig.root);
+              disposeRig(rig.root);
+              existing.delete(prop.id);
+              rig = undefined;
+            }
+            const costumeKey = JSON.stringify({
+              c: prop.costumeCmids || [],
+              m: prop.costumeMtrls || [],
             });
-          }
+            if (!rig) {
+              const tmpl = await withRetry(() => loadTemplate(prop.tmplCno), () => cancelled);
+              if (cancelled) return;
+              rig = instantiateTemplateRig(tmpl, prop.costumeCmids, prop.costumeMtrls);
+              rig.root.userData = {
+                id: prop.id,
+                type: 'prop',
+                tmplCno: prop.tmplCno,
+                appliedCostumeKey: costumeKey,
+                enableShading: enableShadingRef.current,
+              };
+              applyObjectShadingMode(rig.root, enableShadingRef.current);
+              group.add(rig.root);
+              existing.set(prop.id, rig);
+              if (!cancelled) setSyncVersion((v) => v + 1);
+            } else if (rig.root.userData.appliedCostumeKey !== costumeKey) {
+              rig.root.userData.appliedCostumeKey = costumeKey;
+              applyCostumeToRig(rig, prop.costumeCmids || [], prop.costumeMtrls);
+              applyObjectShadingMode(rig.root, enableShadingRef.current);
+            }
 
-          await Promise.all(
-            Array.from(neededAnids).map(async (anid) => {
-              const key = `${prop.id}:${anid}`;
-              if (!activeActionsRef.current.has(key)) {
-                const act = await loadAction(tmpl, anid);
-                if (!cancelled && act) {
-                  activeActionsRef.current.set(key, act);
+            const tmpl = rig.template;
+            const neededAnids = new Set<number>([prop.anid ?? tmpl.actions[0]?.anid ?? 0]);
+            const matchByName = (name?: string) => {
+              if (!name) return undefined;
+              const norm = name.trim().toLowerCase();
+              return tmpl.actions.find((a) => a.name.trim().toLowerCase() === norm)?.anid;
+            };
+            const m0 = matchByName(prop.action);
+            if (m0 !== undefined) neededAnids.add(m0);
+            if (prop.actionKeyframes) {
+              Object.values(prop.actionKeyframes).forEach((k) => {
+                if (k.anid !== undefined) neededAnids.add(k.anid);
+                const mk = matchByName(k.action);
+                if (mk !== undefined) neededAnids.add(mk);
+              });
+            }
+
+            await Promise.all(
+              Array.from(neededAnids).map(async (anid) => {
+                const key = `${prop.id}:${anid}`;
+                if (!activeActionsRef.current.has(key)) {
+                  const act = await withRetry(
+                    () => loadAction(tmpl, anid),
+                    () => cancelled
+                  ).catch(() => null);
+                  if (!cancelled && act) {
+                    activeActionsRef.current.set(key, act);
+                  }
                 }
-              }
-            })
-          );
-        } catch (err) {
-          console.warn(`Failed loading prop ${prop.name}:`, err);
-        }
-      })
-    ).then(() => {
+              })
+            );
+          } catch (err) {
+            if (!cancelled) {
+              console.warn(`Failed loading prop ${prop.name}:`, err);
+            }
+          }
+        })
+      );
       if (!cancelled) setSyncVersion((v) => v + 1);
-    });
+    })();
 
     return () => {
       cancelled = true;
@@ -1580,7 +1640,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           const specKey = `${tdt.text}|${tdt.tdfCno}|${tdt.tdts}|${tdt.mtrlCno ?? ''}`;
           const prev = existing.get(tdt.id);
           if (prev && prev.userData.specKey === specKey) return;
-          const grp = await buildTdtTextGroup(tdt.text, tdt.tdfCno, tdt.tdts, tdt.mtrlCno);
+          const grp = await withRetry(
+            () => buildTdtTextGroup(tdt.text, tdt.tdfCno, tdt.tdts, tdt.mtrlCno),
+            () => cancelled
+          );
           if (cancelled) return;
           if (prev) {
             container.remove(prev);
@@ -1595,7 +1658,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           container.add(grp);
           existing.set(tdt.id, grp);
         } catch (err) {
-          console.warn(`Failed building 3D word ${tdt.text}:`, err);
+          if (!cancelled) {
+            console.warn(`Failed building 3D word ${tdt.text}:`, err);
+          }
         }
       })
     ).then(() => {
@@ -1770,8 +1835,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
       const resolvedTdtAct = resolveTdtActionAtFrame(tdt, stageFrame);
       const localTdtFrame = resolvedTdtAct.freeze
-        ? 0
-        : Math.max(0, stageFrame - resolvedTdtAct.startFrame);
+        ? resolvedTdtAct.celOffset
+        : resolvedTdtAct.celOffset + Math.max(0, stageFrame - resolvedTdtAct.startFrame);
       const sx = pos.scaleX ?? 1;
       const sy = pos.scaleY ?? 1;
       const sz = pos.scaleZ ?? 1;

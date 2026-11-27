@@ -77,6 +77,7 @@ export type TdtAction =
 
 export interface TdtActionKeyframe {
   action: TdtAction | string;
+  celOffset?: number;
   freeze?: boolean;
 }
 

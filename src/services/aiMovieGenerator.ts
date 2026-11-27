@@ -10,6 +10,7 @@ import {
   Scene,
   SceneTransition,
   ScreenTextBox,
+  TdtActionKeyframe,
   TdtTextEntity,
 } from '../types/movie';
 import {
@@ -35,6 +36,7 @@ import {
   MODEL_FALLBACK_CHAIN,
 } from './aiTrainingContext';
 import { selectFullTrainedCorpusContext, type TrainingCorpus } from './trainedCorpusFormatter';
+import { getArchive } from './chunkyParser';
 import { assetUrl } from '../utils/assetUrl';
 
 interface AiKeyframePlan {
@@ -91,6 +93,9 @@ interface AiMoviePlan {
       fontName?: string;
       shapeName?: string;
       action?: string;
+      celOffset?: number;
+      freeze?: boolean;
+      actionSegments?: AiActionSegmentPlan[];
       colorHex?: string;
       startFrame?: number;
       endFrame?: number;
@@ -256,22 +261,82 @@ function findSceneMatch(name: string, scenes: CatalogSceneItem[]): CatalogSceneI
   );
 }
 
-function findActorMatch(name: string, actors: CatalogActorItem[]): CatalogActorItem {
+const CATALOG_NAME_ALIASES: Record<string, string> = {
+  explosion: 'explosio',
+  explode: 'explosio',
+  skelly: 'skelly',
+  skeleton: 'skelly',
+  cathy: 'cathy scratch',
+  mcgee: 'mcgee',
+  laura: 'laura',
+  nakita: 'nakita',
+};
+
+function findCatalogEntityByName<T extends { name: string }>(
+  name: string,
+  items: T[],
+  fallbackPick: () => T
+): T {
   const clean = (name || '').trim().toLowerCase();
-  return (
-    actors.find((a) => a.name.toLowerCase() === clean) ||
-    actors.find((a) => a.name.toLowerCase().includes(clean) || clean.includes(a.name.toLowerCase())) ||
-    actors[Math.floor(Math.random() * Math.max(1, actors.length))]
+  if (!clean || items.length === 0) return fallbackPick();
+
+  const exact = items.find((item) => item.name.trim().toLowerCase() === clean);
+  if (exact) return exact;
+
+  const alnumClean = clean.replace(/[^a-z0-9]/g, '');
+  const aliased = CATALOG_NAME_ALIASES[alnumClean] || clean;
+  if (alnumClean.length >= 2) {
+    const alnumExact = items.find((item) => {
+      const iLow = item.name.trim().toLowerCase();
+      const iAlnum = iLow.replace(/[^a-z0-9]/g, '');
+      return iLow === aliased || iAlnum === alnumClean;
+    });
+    if (alnumExact) return alnumExact;
+
+    const substr = items.find((item) => {
+      const iLow = item.name.trim().toLowerCase();
+      const iAlnum = iLow.replace(/[^a-z0-9]/g, '');
+      return (
+        iLow.includes(clean) ||
+        clean.includes(iLow) ||
+        iLow.includes(aliased) ||
+        (iAlnum.length >= 2 && (iAlnum.includes(alnumClean) || alnumClean.includes(iAlnum)))
+      );
+    });
+    if (substr) return substr;
+  }
+
+  const tokens = clean.split(/[^a-z0-9]+/).filter((t) => t.length >= 2);
+  if (tokens.length > 0) {
+    let best: T | null = null;
+    let bestScore = 0;
+    for (const item of items) {
+      const iLow = item.name.trim().toLowerCase();
+      let score = 0;
+      for (const tok of tokens) {
+        if (iLow.includes(tok)) score += tok.length;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = item;
+      }
+    }
+    if (best) return best;
+  }
+
+  return fallbackPick();
+}
+
+function findActorMatch(name: string, actors: CatalogActorItem[]): CatalogActorItem {
+  return findCatalogEntityByName(
+    name,
+    actors,
+    () => actors[Math.floor(Math.random() * Math.max(1, actors.length))]
   );
 }
 
 function findPropMatch(name: string, props: CatalogPropItem[]): CatalogPropItem {
-  const clean = (name || '').trim().toLowerCase();
-  return (
-    props.find((p) => p.name.toLowerCase() === clean) ||
-    props.find((p) => p.name.toLowerCase().includes(clean) || clean.includes(p.name.toLowerCase())) ||
-    props[0]
-  );
+  return findCatalogEntityByName(name, props, () => props[0]);
 }
 
 function resolveTemplateAction(tmpl: ParsedTemplate, requestedName: string): { anid: number; name: string } {
@@ -368,10 +433,22 @@ export function buildEntityKeyframes(
   if (Array.isArray(rawKfs)) {
     for (const kf of rawKfs) {
       const f = Math.round(clamp(kf.frame, 0, totalFrames));
-      const baseScale = kf.scale !== undefined ? clamp(kf.scale, 0.04, 10.0) : 1;
-      const sx = kf.scaleX !== undefined ? clamp(kf.scaleX, 0.04, 10.0) : baseScale;
-      const sy = kf.scaleY !== undefined ? clamp(kf.scaleY, 0.04, 10.0) : baseScale;
-      const sz = kf.scaleZ !== undefined ? clamp(kf.scaleZ, 0.04, 10.0) : baseScale;
+      const baseScale =
+        kf.scale !== undefined && Number.isFinite(kf.scale) && kf.scale > 0.01
+          ? clamp(kf.scale, 0.05, 10.0)
+          : 1;
+      const sx =
+        kf.scaleX !== undefined && Number.isFinite(kf.scaleX) && kf.scaleX > 0.01
+          ? clamp(kf.scaleX, 0.05, 10.0)
+          : baseScale;
+      const sy =
+        kf.scaleY !== undefined && Number.isFinite(kf.scaleY) && kf.scaleY > 0.01
+          ? clamp(kf.scaleY, 0.05, 10.0)
+          : baseScale;
+      const sz =
+        kf.scaleZ !== undefined && Number.isFinite(kf.scaleZ) && kf.scaleZ > 0.01
+          ? clamp(kf.scaleZ, 0.05, 10.0)
+          : baseScale;
       const entry: KeyframePosition = {
         x: clamp(kf.x, -30, 30),
         y: clamp(kf.y, -5, 22),
@@ -417,8 +494,10 @@ export function buildEntityKeyframes(
   }
 
   // Enforce entity-level startFrame / endFrame visibility gates when provided
+  let effStartFrame = 0;
   if (opts.startFrame !== undefined && Number.isFinite(opts.startFrame)) {
     const sf = Math.round(clamp(opts.startFrame, 0, totalFrames));
+    effStartFrame = sf;
     if (sf > 0) {
       const sorted = Object.keys(parsedKfs).map(Number).sort((a, b) => a - b);
       const ref = parsedKfs[sf] || parsedKfs[sorted.find((k) => k >= sf) ?? sorted[0]];
@@ -428,7 +507,7 @@ export function buildEntityKeyframes(
   }
   if (opts.endFrame !== undefined && Number.isFinite(opts.endFrame)) {
     const ef = Math.round(clamp(opts.endFrame, 0, totalFrames));
-    if (ef < totalFrames) {
+    if (ef > effStartFrame && ef < totalFrames) {
       const sorted = Object.keys(parsedKfs).map(Number).sort((a, b) => a - b);
       const prevKey = [...sorted].reverse().find((k) => k <= ef) ?? sorted[0];
       const ref = parsedKfs[ef] || parsedKfs[prevKey];
@@ -2003,17 +2082,33 @@ export async function generateAiMovie(options: {
     await Promise.all(workers);
   };
 
+  const loadTemplatesBatch = async () => {
+    if (neededTmpls.size >= 2) {
+      await getArchive(assetUrl('3dmm/3dmovie/TMPLS.3CN'), false)
+        .then((f) => f.ensureFullBuffer())
+        .catch(() => {});
+    }
+    await Promise.all(
+      Array.from(neededTmpls).map(async (tmplCno) => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const tmpl = await loadTemplate(tmplCno);
+            templateCache.set(tmplCno, tmpl);
+            return;
+          } catch {
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 150 * (attempt + 1)));
+            }
+          }
+        }
+      })
+    );
+  };
+
   const [swatches] = await Promise.all([
     loadTdtMaterialSwatches().catch(() => []),
     runTtsBatch(),
-    ...Array.from(neededTmpls).map(async (tmplCno) => {
-      try {
-        const tmpl = await loadTemplate(tmplCno);
-        templateCache.set(tmplCno, tmpl);
-      } catch {
-        // ignore missing template cache miss
-      }
-    }),
+    loadTemplatesBatch(),
     ...Array.from(neededSoundItems.values()).map(async (item) => {
       try {
         const extracted = await sound3DMM.extractSoundItemCueData(item);
@@ -2280,7 +2375,7 @@ export async function generateAiMovie(options: {
       });
     }
 
-    // Resolve 3D TDT words with authentic actions, stretch/rotation, frame timing & optional keyframes
+    // Resolve 3D TDT words with authentic actions, stretch/rotation, sample-movie frames & optional keyframes
     const tdtTexts: TdtTextEntity[] = [];
     for (let tIdx = 0; tIdx < (sp.tdtTexts || []).length; tIdx++) {
       const tp = sp.tdtTexts![tIdx];
@@ -2293,11 +2388,27 @@ export async function generateAiMovie(options: {
         TDT_SHAPE_OPTIONS.find((s) => s.name.toLowerCase() === (tp.shapeName || '').toLowerCase()) ||
         TDT_SHAPE_OPTIONS[0];
       const startF = Math.round(clamp(tp.startFrame ?? 0, 0, totalFrames));
-      const endF = Math.round(clamp(tp.endFrame ?? totalFrames, startF, totalFrames));
-      const baseSc = tp.scale !== undefined ? clamp(tp.scale, 0.05, 8.0) : 0.7;
-      const sx = tp.scaleX !== undefined ? clamp(tp.scaleX, 0.05, 8.0) : baseSc;
-      const sy = tp.scaleY !== undefined ? clamp(tp.scaleY, 0.05, 8.0) : baseSc;
-      const sz = tp.scaleZ !== undefined ? clamp(tp.scaleZ, 0.05, 8.0) : baseSc;
+      const rawEndF =
+        tp.endFrame !== undefined && Number.isFinite(tp.endFrame)
+          ? Math.round(clamp(tp.endFrame, 0, totalFrames))
+          : totalFrames;
+      const hasValidEndF = rawEndF > startF && rawEndF < totalFrames;
+      const baseSc =
+        tp.scale !== undefined && Number.isFinite(tp.scale) && tp.scale > 0.01
+          ? clamp(tp.scale, 0.05, 8.0)
+          : 0.7;
+      const sx =
+        tp.scaleX !== undefined && Number.isFinite(tp.scaleX) && tp.scaleX > 0.01
+          ? clamp(tp.scaleX, 0.05, 8.0)
+          : baseSc;
+      const sy =
+        tp.scaleY !== undefined && Number.isFinite(tp.scaleY) && tp.scaleY > 0.01
+          ? clamp(tp.scaleY, 0.05, 8.0)
+          : baseSc;
+      const sz =
+        tp.scaleZ !== undefined && Number.isFinite(tp.scaleZ) && tp.scaleZ > 0.01
+          ? clamp(tp.scaleZ, 0.05, 8.0)
+          : baseSc;
       const tdtHex = validHex(tp.colorHex);
       const basePos: KeyframePosition = {
         x: clamp(tp.x, -30, 30),
@@ -2312,33 +2423,102 @@ export async function generateAiMovie(options: {
         visible: true,
         ...(tdtHex ? { color: tdtHex } : {}),
       };
+
+      const matchedTdtAction = normalizeTdtActionName(tp.action);
+      const tdtAkfs: Record<number, TdtActionKeyframe> = {};
+      if (Array.isArray(tp.actionSegments) && tp.actionSegments.length > 0) {
+        for (const seg of tp.actionSegments) {
+          const sf = Math.round(clamp(seg.frame, 0, totalFrames));
+          const segAct = normalizeTdtActionName(seg.actionName);
+          tdtAkfs[sf] = {
+            action: segAct,
+            celOffset: 0,
+            ...(segAct === 'At Rest' ? { freeze: true } : { freeze: false }),
+          };
+        }
+      }
+      if (!tdtAkfs[startF]) {
+        const celOff =
+          tp.celOffset !== undefined && Number.isFinite(tp.celOffset)
+            ? Math.max(0, Math.round(tp.celOffset))
+            : 0;
+        const frz =
+          tp.freeze !== undefined
+            ? Boolean(tp.freeze)
+            : matchedTdtAction === 'At Rest';
+        tdtAkfs[startF] = {
+          action: matchedTdtAction,
+          celOffset: celOff,
+          freeze: frz,
+        };
+      }
+
       let kfs: Record<number, KeyframePosition> = {};
       if (Array.isArray(tp.keyframes) && tp.keyframes.length > 0) {
-        const mappedTdtKfs: AiKeyframePlan[] = tp.keyframes.map((k) => ({
-          ...k,
-          scaleX: k.scaleX ?? (k.scale ?? sx),
-          scaleY: k.scaleY ?? (k.scale ?? sy),
-          scaleZ: k.scaleZ ?? (k.scale ?? sz),
-          colorHex: k.colorHex ?? tdtHex,
-        }));
+        const mappedTdtKfs: AiKeyframePlan[] = tp.keyframes.map((k) => {
+          const kBase =
+            k.scale !== undefined && Number.isFinite(k.scale) && k.scale > 0.01 ? k.scale : undefined;
+          const kSx =
+            k.scaleX !== undefined && Number.isFinite(k.scaleX) && k.scaleX > 0.01
+              ? k.scaleX
+              : (kBase ?? sx);
+          const kSy =
+            k.scaleY !== undefined && Number.isFinite(k.scaleY) && k.scaleY > 0.01
+              ? k.scaleY
+              : (kBase ?? sy);
+          const kSz =
+            k.scaleZ !== undefined && Number.isFinite(k.scaleZ) && k.scaleZ > 0.01
+              ? k.scaleZ
+              : (kBase ?? sz);
+          return {
+            ...k,
+            scaleX: kSx,
+            scaleY: kSy,
+            scaleZ: kSz,
+            colorHex: k.colorHex ?? tdtHex,
+          };
+        });
         kfs = buildEntityKeyframes(mappedTdtKfs, totalFrames, basePos.x, basePos.z, {
           colorHex: tdtHex,
           startFrame: startF,
-          endFrame: endF,
+          endFrame: hasValidEndF ? rawEndF : undefined,
           isActor: false,
           entityName: 'tdt',
           allowSlowUser,
+          onRemapFrames: (remap) => {
+            if (remap.length === 0) return;
+            const nextAkfs: Record<number, TdtActionKeyframe> = {};
+            for (const [fKey, val] of Object.entries(tdtAkfs)) {
+              const fNum = Number(fKey);
+              let mappedF = fNum;
+              for (let r = 0; r < remap.length; r++) {
+                if (fNum === remap[r].origF) {
+                  mappedF = remap[r].newF;
+                  break;
+                }
+                if (r + 1 < remap.length && fNum > remap[r].origF && fNum < remap[r + 1].origF) {
+                  const frac =
+                    (fNum - remap[r].origF) / Math.max(1, remap[r + 1].origF - remap[r].origF);
+                  mappedF = Math.round(remap[r].newF + frac * (remap[r + 1].newF - remap[r].newF));
+                  break;
+                }
+              }
+              nextAkfs[mappedF] = val;
+            }
+            for (const k of Object.keys(tdtAkfs)) delete tdtAkfs[Number(k)];
+            Object.assign(tdtAkfs, nextAkfs);
+          },
         });
       } else {
         if (startF > 0) {
           kfs[0] = { ...basePos, visible: false };
         }
         kfs[startF] = { ...basePos, visible: true };
-        if (endF < totalFrames) {
-          kfs[endF] = { ...basePos, visible: false };
+        if (hasValidEndF) {
+          kfs[rawEndF] = { ...basePos, visible: false };
         }
       }
-      const matchedTdtAction = normalizeTdtActionName(tp.action);
+
       tdtTexts.push({
         id: `ai_tdt_${sIdx}_${tIdx}_${Math.random().toString(36).slice(2, 6)}`,
         text: textVal.slice(0, 28),
@@ -2346,9 +2526,7 @@ export async function generateAiMovie(options: {
         tdts: shape.tdts,
         mtrlCno: tdtPaletteSwatches[tIdx % Math.max(1, tdtPaletteSwatches.length)]?.mtrlCno,
         action: matchedTdtAction,
-        actionKeyframes: {
-          [startF]: { action: matchedTdtAction },
-        },
+        actionKeyframes: tdtAkfs,
         keyframes: kfs,
       });
     }

@@ -11,6 +11,7 @@ import {
 import {
   CatalogActorItem,
   CatalogPropItem,
+  getTdtActionCelCount,
   loadTdtMaterialSwatches,
   loadTemplate,
   ParsedTemplate,
@@ -84,7 +85,7 @@ interface ActorPropPanelProps {
   ) => void;
   onUpdateEntityPoseCel: (
     id: string,
-    type: 'actor' | 'prop',
+    type: 'actor' | 'prop' | 'tdt',
     celOffset: number,
     freeze: boolean
   ) => void;
@@ -595,7 +596,25 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
             min={0}
             max={Math.max(1800, totalFrames + 300)}
             value={targetFrameInput}
-            onChange={(e) => setTargetFrameInput(e.target.value)}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setTargetFrameInput(raw);
+              if (raw.trim() !== '' && /^\d+$/.test(raw.trim())) {
+                const parsed = Math.max(0, Math.min(3600, Math.round(Number(raw))));
+                onSeekFrame(parsed);
+              }
+            }}
+            onBlur={() => {
+              if (targetFrameInput.trim() === '') {
+                setTargetFrameInput(String(currentFrame));
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                onSetEntityFrame(id, kind, parseTargetFrame(), 'pin');
+              }
+            }}
             className="studio-well px-1.5 py-0.5 w-14 text-[11px] font-mono text-amber-200 focus:outline-none"
           />
           <button
@@ -681,58 +700,56 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
           </div>
         )}
 
-        {kind !== 'tdt' && (
-          <div className="flex flex-wrap items-center justify-between gap-1">
-            <span className="text-purple-200 shrink-0">
-              Pose Cel ({celsCount > 0 ? celsCount : 'auto'}):
-            </span>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() =>
-                  onUpdateEntityPoseCel(id, kind, Math.max(0, curCel - 1), true)
-                }
-                className="studio-btn px-1.5 py-0.5 font-bold"
-              >
-                -
-              </button>
-              <input
-                type="number"
-                min={0}
-                max={999}
-                value={curCel}
-                onChange={(e) =>
-                  onUpdateEntityPoseCel(
-                    id,
-                    kind,
-                    Math.max(0, Number(e.target.value) || 0),
-                    true
-                  )
-                }
-                className="studio-well px-1 py-0.5 w-11 text-center font-mono text-white"
-              />
-              <button
-                type="button"
-                onClick={() => onUpdateEntityPoseCel(id, kind, curCel + 1, true)}
-                className="studio-btn px-1.5 py-0.5 font-bold"
-              >
-                +
-              </button>
-              <button
-                type="button"
-                onClick={() => onUpdateEntityPoseCel(id, kind, curCel, !isFreeze)}
-                className={`px-1.5 py-0.5 font-bold border ${
-                  isFreeze
-                    ? 'bg-amber-400 text-black border-white'
-                    : 'studio-btn text-cyan-200'
-                }`}
-                title="Lock pose at this exact cel or let animation advance"
-              >
-                {isFreeze ? 'Pinned' : 'Play'}
-              </button>
-            </div>
+        <div className="flex flex-wrap items-center justify-between gap-1">
+          <span className="text-purple-200 shrink-0">
+            Pose Cel ({celsCount > 0 ? celsCount : 'auto'}):
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() =>
+                onUpdateEntityPoseCel(id, kind, Math.max(0, curCel - 1), true)
+              }
+              className="studio-btn px-1.5 py-0.5 font-bold"
+            >
+              -
+            </button>
+            <input
+              type="number"
+              min={0}
+              max={999}
+              value={curCel}
+              onChange={(e) =>
+                onUpdateEntityPoseCel(
+                  id,
+                  kind,
+                  Math.max(0, Number(e.target.value) || 0),
+                  true
+                )
+              }
+              className="studio-well px-1 py-0.5 w-11 text-center font-mono text-white"
+            />
+            <button
+              type="button"
+              onClick={() => onUpdateEntityPoseCel(id, kind, curCel + 1, true)}
+              className="studio-btn px-1.5 py-0.5 font-bold"
+            >
+              +
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateEntityPoseCel(id, kind, curCel, !isFreeze)}
+              className={`px-1.5 py-0.5 font-bold border ${
+                isFreeze
+                  ? 'bg-amber-400 text-black border-white'
+                  : 'studio-btn text-cyan-200'
+              }`}
+              title="Lock pose at this exact cel or let animation advance"
+            >
+              {isFreeze ? 'Pinned' : 'Play'}
+            </button>
           </div>
-        )}
+        </div>
       </div>
     );
   };
@@ -1622,8 +1639,24 @@ export const ActorPropPanel: React.FC<ActorPropPanelProps> = ({
               )}
           </div>
 
-          {/* Frame Timing directly accessible when selecting a 3D Word */}
-          {renderFrameTimingControls(selectedTdt.id, 'tdt', selectedTdt.keyframes)}
+          {/* Frame Timing & Pose Cel pinning directly accessible when selecting a 3D Word */}
+          {(() => {
+            const celsLen = getTdtActionCelCount(activeTdtAction.action);
+            const rawCel = activeTdtAction.freeze
+              ? activeTdtAction.celOffset
+              : activeTdtAction.celOffset +
+                Math.max(0, currentFrame - activeTdtAction.startFrame);
+            const dispCel =
+              celsLen > 1 ? ((rawCel % celsLen) + celsLen) % celsLen : 0;
+            return renderFrameTimingControls(
+              selectedTdt.id,
+              'tdt',
+              selectedTdt.keyframes,
+              celsLen,
+              dispCel,
+              activeTdtAction.freeze
+            );
+          })()}
 
           <div className="grid grid-cols-2 gap-1.5 text-[10px]">
             <label className="flex flex-col gap-0.5">

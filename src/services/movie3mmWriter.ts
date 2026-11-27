@@ -688,16 +688,16 @@ export async function exportMovieTo3mmBytes(movie: Movie): Promise<Uint8Array> {
           [{ ctg: 'TDT ', cno: tdtCno, chid: 0 }],
           100000 + actrChid
         );
-        const tdtActionEntries: [string, { action: string; freeze?: boolean }][] =
+        const tdtActionEntries: [string, { action: string; celOffset?: number; freeze?: boolean }][] =
           tdt.actionKeyframes && Object.keys(tdt.actionKeyframes).length > 0
             ? Object.entries(tdt.actionKeyframes).sort(([a], [b]) => Number(a) - Number(b))
             : tdt.action
-              ? [['0', { action: tdt.action, freeze: false }]]
+              ? [['0', { action: tdt.action, celOffset: 0, freeze: false }]]
               : [];
         const tdtEvents = tdtActionEntries.map(([fk, av]) => ({
           frame: Math.max(0, Math.round(Number(fk))),
           anid: tdtActionToAnid(av.action),
-          celOffset: 0,
+          celOffset: Math.max(0, Math.round(av.celOffset ?? 0)),
           freeze: Boolean(av.freeze),
         }));
         const extraKids: ChunkKid[] = [];
